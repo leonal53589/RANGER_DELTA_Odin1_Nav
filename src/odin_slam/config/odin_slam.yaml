@@ -1,0 +1,15 @@
+odin_slam_node:
+  ros__parameters:
+    save_pcd_path: "/home/leona/WorkingSpace/navigation2/project_slam/maps"
+    cropbox:
+      min_x: -10.0
+      min_y: -10.0
+      min_z: -10.0
+      max_x: 10.0
+      max_y: 10.0
+      max_z: 2.0
+    voxel:
+      leaf_size: 0.02
+    sor:
+      mean_k: 50
+      stddev_mul_thresh: 2.5
