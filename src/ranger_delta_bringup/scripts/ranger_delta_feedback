@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+
+from ranger_delta_bringup.feedback import main
+
+if __name__ == '__main__':
+    main()

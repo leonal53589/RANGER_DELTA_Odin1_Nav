@@ -11,8 +11,12 @@ project_slam/
 ├── src/
 │   ├── odin_ros_driver/       # 留形 Odin1 官方驱动（已适配哨兵工程低负载参数与 SensorDataQoS）
 │   ├── odin_slam/             # 点云累加 SLAM 节点与 Qt 控制界面（一键运行/暂停/保存 PCD）
-│   └── odin_cloud_cleaner/    # 留形点云去噪与自车遮挡剔除预处理节点（备用）
+│   ├── odin_cloud_cleaner/    # 留形点云去噪与自车遮挡剔除预处理节点（备用）
+│   ├── odin_nav_sim/          # Nav2 导航仿真
+│   ├── ranger_delta_bringup/  # RANGER DELTA 底盘接口
+│   └── vendor/ranger_ros2/    # 由 dependencies.repos 固定版本的松灵源码
 ├── maps/                      # 建图结果保存目录（自动生成 0.pcd, 1.pcd...）
+├── dependencies.repos         # 第三方源码的仓库地址与版本
 └── README.md
 ```
 
@@ -43,12 +47,24 @@ sudo udevadm trigger
 
 ## 三、编译工作空间
 
-本项目已经预先下载了官方预编译静态库 `liblydHostApi_amd.a` 并通过了编译。若后续修改了源码，重新编译只需：
+新检出工作空间时，进入项目根目录并恢复固定版本的松灵源码。
 
 ```bash
 cd /home/leona/WorkingSpace/navigation2/project_slam
+sudo apt install python3-vcstool libboost-dev nlohmann-json3-dev
+vcs import src < dependencies.repos
+```
+
+项目已包含留形的预编译静态库 `liblydHostApi_amd.a`。在新终端中进入项目根目录，加载 Humble 并构建工作空间。
+
+```bash
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 ```
+
+只编译底盘及其依赖时，用 `colcon build --packages-up-to ranger_delta_bringup --symlink-install`。
+
+编译后，在项目根目录的每个新终端执行 `source install/setup.bash`。底盘运行与验收见 [底盘反馈回放](docs/PROGRESS.md#阶段-2-底盘反馈回放)。
 
 ---
 

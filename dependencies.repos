@@ -1,0 +1,5 @@
+repositories:
+  vendor/ranger_ros2:
+    type: git
+    url: https://github.com/agilexrobotics/ranger_ros2.git
+    version: fb96124fa68c49bab03d8ddd2294c2afd45af925

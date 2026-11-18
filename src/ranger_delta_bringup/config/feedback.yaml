@@ -1,0 +1,11 @@
+ranger_delta_feedback:
+  ros__parameters:
+    # Configure SocketCAN externally at 500000 bit/s. Replay never opens this interface.
+    can_interface: can0
+    wheelbase: 0.378
+    track: 0.338
+    feedback_timeout: 0.2
+    odom_frame: odom
+    base_frame: base_link
+    odom_topic: /agx/wheel_odom_raw
+    publish_odom_tf: true
