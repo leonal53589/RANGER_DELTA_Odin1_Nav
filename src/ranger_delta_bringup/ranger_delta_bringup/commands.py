@@ -39,8 +39,25 @@ def velocity_command(vx, vy, wz, *, wheelbase, track, max_linear, max_angular, m
         return MotionCommand(SPIN, yaw_rate=wz)
 
     if vy:
-        direction = -1.0 if vx < 0.0 else 1.0
-        steering = math.atan2(direction * vy, direction * vx)
+        if vx == 0.0:
+            # Ranger Delta physical steering range is [-30°, +90°].
+            # In CAN 0x111, negative values steer the wheels to positive angles [0, +90°].
+            # Positive values (> 0.52 rad) hit the -30° negative physical stop.
+            # To support lateral crab motion in both directions (left and right),
+            # the wheels are aligned horizontally at CAN steering -1.571 rad (+90° physical).
+            # Lateral direction is controlled by reversing wheel drive velocity:
+            # vy < 0 (Right): speed > 0, steering = -pi/2
+            # vy > 0 (Left):  speed < 0, steering = -pi/2
+            steering = -math.pi / 2
+            direction = -1.0 if vy > 0.0 else 1.0
+        else:
+            direction = -1.0 if vx < 0.0 else 1.0
+            steering = math.atan2(direction * vy, direction * vx)
+            if steering > 0.523:
+                steering -= math.pi
+                direction = -direction
+            elif steering < -math.pi / 2:
+                steering = -math.pi / 2
         mode = CRAB
     else:
         direction = math.copysign(1.0, vx)

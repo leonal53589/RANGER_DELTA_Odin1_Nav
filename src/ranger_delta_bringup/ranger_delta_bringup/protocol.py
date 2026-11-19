@@ -6,12 +6,16 @@ from dataclasses import dataclass
 
 SYSTEM_STATUS = 0x211
 CHASSIS_MOTION = 0x221
+STEERING_ANGLES = 0x271
+WHEEL_SPEEDS = 0x281
 MOTION_MODE = 0x291
 CAN_FRAME = struct.Struct('=IB3x8s')
 
 FRAME_FORMATS = {
     SYSTEM_STATUS: struct.Struct('>BBHI'),
     CHASSIS_MOTION: struct.Struct('>hhxxh'),
+    STEERING_ANGLES: struct.Struct('>hhhh'),
+    WHEEL_SPEEDS: struct.Struct('>hhhh'),
     MOTION_MODE: struct.Struct('>BBB'),
 }
 CANDUMP_LINE = re.compile(r'^\((\d+(?:\.\d+)?)\)\s+\S+\s+([\da-fA-F]{3})#([\da-fA-F]*)$')
@@ -26,7 +30,7 @@ def decode_frame(can_id, payload):
     if can_id == SYSTEM_STATUS:
         status, control_mode, voltage_tenths, faults = fields
         return status, control_mode, voltage_tenths / 10.0, faults
-    if can_id == CHASSIS_MOTION:
+    if can_id in (CHASSIS_MOTION, STEERING_ANGLES, WHEEL_SPEEDS):
         return tuple(value / 1000.0 for value in fields)
     return fields
 

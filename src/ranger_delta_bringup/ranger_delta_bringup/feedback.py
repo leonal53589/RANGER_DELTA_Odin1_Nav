@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 import rclpy
-from agx_bringup.msg import ChassisMotion, FaultBit, MotionModeFeedback, SystemStatus
+from agx_bringup.msg import ChassisMotion, FaultBit, MotionModeFeedback, SteeringAngles, SystemStatus, WheelSpeeds
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
@@ -17,7 +17,9 @@ from .protocol import (
     CHASSIS_MOTION,
     FRAME_FORMATS,
     MOTION_MODE,
+    STEERING_ANGLES,
     SYSTEM_STATUS,
+    WHEEL_SPEEDS,
     OdometryEstimate,
     body_velocity,
     decode_frame,
@@ -56,6 +58,8 @@ class RangerDeltaFeedback(Node):
         self.status_pub = self.create_publisher(SystemStatus, '/system_status', 10)
         self.motion_pub = self.create_publisher(ChassisMotion, '/chassis_motion_feedback', 10)
         self.mode_pub = self.create_publisher(MotionModeFeedback, '/motion_mode_feedback', 10)
+        self.steering_pub = self.create_publisher(SteeringAngles, '/steering_angles', 10)
+        self.wheel_speeds_pub = self.create_publisher(WheelSpeeds, '/wheel_speeds', 10)
         self.odom_pub = self.create_publisher(Odometry, odom_topic, 10)
         self.tf = TransformBroadcaster(self) if publish_tf else None
 
@@ -138,6 +142,20 @@ class RangerDeltaFeedback(Node):
                 mode=mode, mode_text=MODE_NAMES.get(mode, 'Unknown'),
                 switch_status=switching, switch_text=SWITCH_NAMES.get(switching, 'Unknown'),
                 drive_mode=drive_mode, drive_mode_text=DRIVE_NAMES.get(drive_mode, 'Unknown'),
+            ))
+        elif can_id == STEERING_ANGLES:
+            self.steering_pub.publish(SteeringAngles(
+                steering_01=feedback[0],
+                steering_02=feedback[1],
+                steering_03=feedback[2],
+                steering_04=feedback[3],
+            ))
+        elif can_id == WHEEL_SPEEDS:
+            self.wheel_speeds_pub.publish(WheelSpeeds(
+                wheel_01=feedback[0],
+                wheel_02=feedback[1],
+                wheel_03=feedback[2],
+                wheel_04=feedback[3],
             ))
         elif can_id == CHASSIS_MOTION:
             self.motion_pub.publish(ChassisMotion(

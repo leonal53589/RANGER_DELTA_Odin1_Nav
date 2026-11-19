@@ -5,7 +5,9 @@ import pytest
 from ranger_delta_bringup.protocol import (
     CHASSIS_MOTION,
     MOTION_MODE,
+    STEERING_ANGLES,
     SYSTEM_STATUS,
+    WHEEL_SPEEDS,
     OdometryEstimate,
     body_velocity,
     decode_frame,
@@ -23,6 +25,12 @@ def test_motion_feedback_decodes_signed_values_and_rejects_truncated_frames():
     assert decode_frame(CHASSIS_MOTION, motion) == (-0.2, 0.5, -1.571)
     assert decode_frame(CHASSIS_MOTION, motion[:-1]) is None
     assert decode_frame(MOTION_MODE, bytes.fromhex('010100')) == (1, 1, 0)
+    steering = bytes.fromhex('0623F9DD00000623')
+    assert decode_frame(STEERING_ANGLES, steering) == (1.571, -1.571, 0.0, 1.571)
+    assert decode_frame(STEERING_ANGLES, steering[:-1]) is None
+    speeds = bytes.fromhex('0050FF9C00000050')
+    assert decode_frame(WHEEL_SPEEDS, speeds) == (0.08, -0.1, 0.0, 0.08)
+    assert decode_frame(WHEEL_SPEEDS, speeds[:-1]) is None
 
 
 def test_replay_preserves_feedback_order_and_timestamp():

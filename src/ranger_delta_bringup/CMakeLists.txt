@@ -5,7 +5,7 @@ find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
-install(PROGRAMS scripts/ranger_delta_feedback scripts/ranger_delta_command DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/ranger_delta_feedback scripts/ranger_delta_command scripts/ranger_delta_teleop_gui scripts/ranger_delta_wheel_monitor scripts/ranger_delta_steer_verifier DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)

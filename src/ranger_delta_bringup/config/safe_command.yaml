@@ -1,0 +1,11 @@
+ranger_delta_command:
+  ros__parameters:
+    cmd_vel_topic: /cmd_vel
+    can_interface: can0
+    wheelbase: 0.378
+    track: 0.338
+    max_linear_speed: 0.15      # 安全首测低速保护: 最大 0.15 m/s (15 cm/s)
+    max_angular_speed: 0.30     # 安全首测低速保护: 最大 0.30 rad/s (~17°/s)
+    minimum_turn_radius: 0.5
+    command_timeout: 0.30       # 指令超时保护: 0.30秒未收到指令自动停车
+    feedback_timeout: 0.20      # 回馈超时保护: 0.20秒CAN断联自动停车

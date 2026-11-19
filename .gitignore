@@ -1,6 +1,29 @@
-build
-image
-install
-log
-.vscode
+# Colcon & ROS 2 build directories
+build/
+install/
+log/
+logs/
+
+# Python cache & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Runtime test data & logs
+*.log
+*.csv
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Vendor repositories & submodules
 /src/vendor/ranger_ros2/
+
+# Media / temporary images
+image/

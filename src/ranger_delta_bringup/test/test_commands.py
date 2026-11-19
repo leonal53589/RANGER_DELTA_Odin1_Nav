@@ -33,6 +33,10 @@ def test_velocity_encoding_and_limits():
     assert crab.mode == CRAB
     assert struct.unpack('>hhxxh', crab.frame()[1]) == (200, 0, -1571)
 
+    crab_left = velocity_command(0.0, 0.2, 0.0, **LIMITS)
+    assert crab_left.mode == CRAB
+    assert struct.unpack('>hhxxh', crab_left.frame()[1]) == (-200, 0, -1571)
+
     spin = velocity_command(0.0, 0.0, -1.0, **LIMITS)
     assert spin.mode == SPIN
     assert struct.unpack('>hhxxh', spin.frame()[1]) == (0, -600, 0)
