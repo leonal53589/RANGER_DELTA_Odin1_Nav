@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<robot name="ranger_delta" xmlns:xacro="http://ros.org/wiki/xacro">
+  <xacro:include filename="$(find ranger_delta_bringup)/agilex_delta/ranger_delta_description.urdf" />
+
+  <xacro:arg name="sensor_mounted" default="false" />
+  <xacro:arg name="sensor_xyz" default="" />
+  <xacro:arg name="sensor_rpy" default="0 0 0" />
+
+  <!-- The official wheel meshes touch Z=0. The front wheel lies along -X. -->
+  <link name="base_link" />
+  <joint name="base_to_agilex" type="fixed">
+    <parent link="base_link" />
+    <child link="agilex_base_link" />
+    <origin xyz="0 0 0" rpy="0 0 ${pi}" />
+  </joint>
+
+  <!-- Provisional payload envelope until the completed vehicle is measured. -->
+  <xacro:property name="chassis_top" value="0.263" />
+  <xacro:property name="overall_height" value="1.30" />
+  <xacro:property name="payload_radius" value="0.58" />
+  <xacro:property name="payload_height" value="${overall_height - chassis_top}" />
+  <link name="upper_payload_link">
+    <visual>
+      <geometry>
+        <cylinder radius="${payload_radius}" length="${payload_height}" />
+      </geometry>
+      <material name="upper_payload_gray">
+        <color rgba="0.35 0.35 0.40 0.65" />
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="${payload_radius}" length="${payload_height}" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_to_upper_payload" type="fixed">
+    <parent link="base_link" />
+    <child link="upper_payload_link" />
+    <origin xyz="0 0 ${chassis_top + payload_height / 2}" rpy="0 0 0" />
+  </joint>
+
+  <xacro:if value="$(arg sensor_mounted)">
+    <link name="lidar" />
+    <joint name="base_to_lidar" type="fixed">
+      <parent link="base_link" />
+      <child link="lidar" />
+      <origin xyz="$(arg sensor_xyz)" rpy="$(arg sensor_rpy)" />
+    </joint>
+
+    <link name="odin_link">
+      <visual>
+        <geometry>
+          <box size="0.043 0.100 0.062" />
+        </geometry>
+        <material name="odin_blue">
+          <color rgba="0.0 0.4 0.85 1.0" />
+        </material>
+      </visual>
+    </link>
+    <joint name="lidar_to_odin_model" type="fixed">
+      <parent link="lidar" />
+      <child link="odin_link" />
+    </joint>
+  </xacro:if>
+</robot>

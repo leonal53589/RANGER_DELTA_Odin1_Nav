@@ -3,3 +3,7 @@ repositories:
     type: git
     url: https://github.com/agilexrobotics/ranger_ros2.git
     version: fb96124fa68c49bab03d8ddd2294c2afd45af925
+  vendor/agilex_models/ugv_gazebo_sim:
+    type: git
+    url: https://github.com/agilexrobotics/ugv_gazebo_sim.git
+    version: 27633a956c845903ee630538afeb17fe70afdd84

@@ -24,6 +24,7 @@ __pycache__/
 
 # Vendor repositories & submodules
 /src/vendor/ranger_ros2/
+/src/vendor/agilex_models/ugv_gazebo_sim/
 
 # Media / temporary images
 image/

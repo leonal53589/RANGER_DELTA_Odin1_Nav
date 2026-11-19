@@ -2248,6 +2248,9 @@ int main(int argc, char *argv[])
     #endif
         std::string config_dir = package_path + "/config";
         std::string config_file = config_dir + "/control_command.yaml";
+#ifdef ROS2
+        config_file = node->declare_parameter<std::string>("config_file", config_file);
+#endif
 
         // Initialize command file path to /tmp/odin_command.txt
         g_command_file_path = "/tmp/odin_command.txt";

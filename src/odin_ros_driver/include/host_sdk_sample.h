@@ -262,6 +262,8 @@ public:
     #ifdef ROS2
         MultiSensorPublisher(rclcpp::Node::SharedPtr node)
             : node_(node),cameraposevisual_ {1.0f, 0.0f, 0.0f, 1.0f} {
+            odom_frame_ = node_->declare_parameter<std::string>("odom_frame", "odom");
+            map_frame_ = node_->declare_parameter<std::string>("map_frame", "map");
             initialize_publishers();
             // initialize_data_logger();
         }
@@ -616,7 +618,7 @@ void process_pair(const ImageConstPtr &rgb_msg, const PointCloud2ConstPtr &pcd_m
 void publishIntensityCloud(capture_Image_List_t* stream, int idx)
 {
     // Check index validity
-    if (idx < 0 || idx >= 10) {
+    if (idx < 0 || idx >= DEVICE_MAX_CH_NUMBER || static_cast<uint32_t>(idx) >= stream->imageCount) {
         #ifndef ROS2
             ROS_ERROR("Invalid index %d for intensity cloud", idx);
         #endif
@@ -910,7 +912,7 @@ void publishRgb(capture_Image_List_t *stream) {
     {
         #ifdef ROS2
                 sensor_msgs::msg::PointCloud2 msg;
-                msg.header.frame_id = "odom";
+                msg.header.frame_id = odom_frame_;
                 msg.header.stamp = make_aligned_stamp(stream->imageList[0].timestamp, node_);
 
                 //RCLCPP_INFO(rclcpp::get_logger("device_cb"), "Point cloudrgba %ld",stream->imageList[0].timestamp);
@@ -1186,7 +1188,7 @@ void publishRgb(capture_Image_List_t *stream) {
 #ifdef ROS2
         auto msg = nav_msgs::msg::Odometry();
         msg.header.stamp = make_aligned_stamp(odom_data->timestamp_ns, node_);
-        msg.header.frame_id = "odom";
+        msg.header.frame_id = odom_frame_;
 #else
         nav_msgs::Odometry msg;
         msg.header.stamp = make_aligned_stamp(odom_data->timestamp_ns);
@@ -1259,11 +1261,11 @@ void publishRgb(capture_Image_List_t *stream) {
         
 #ifdef ROS2
             auto msg = nav_msgs::msg::Odometry();
+            msg.header.frame_id = odom_frame_;
 #else
             ros::Odometry msg;
-#endif
-        
             msg.header.frame_id = "odom";
+#endif
             msg.child_frame_id = "imu";
 
             //RCLCPP_INFO(rclcpp::get_logger("device_cb"), "odom %ld",odom_data->timestamp_ns);
@@ -1355,7 +1357,7 @@ void publishRgb(capture_Image_List_t *stream) {
                     if (getRosNodeControl()->sendOdomBaseLinkTF()) {
                         geometry_msgs::msg::TransformStamped transformStamped;
                         transformStamped.header.stamp = msg.header.stamp;
-                        transformStamped.header.frame_id = "odom";
+                        transformStamped.header.frame_id = odom_frame_;
                         transformStamped.child_frame_id = "imu";
                         transformStamped.transform.translation.x = msg.pose.pose.position.x;
                         transformStamped.transform.translation.y = msg.pose.pose.position.y;
@@ -1428,7 +1430,7 @@ void publishRgb(capture_Image_List_t *stream) {
                                 q_wc.normalize();
 
                                 geometry_msgs::msg::TransformStamped tf_wc;
-                                tf_wc.header.frame_id = "odom";
+                                tf_wc.header.frame_id = odom_frame_;
                                 tf_wc.child_frame_id = "camera_0";
                                 tf_wc.transform.translation.x = T_wc(0, 3);
                                 tf_wc.transform.translation.y = T_wc(1, 3);
@@ -1531,8 +1533,8 @@ void publishRgb(capture_Image_List_t *stream) {
                     {
                     geometry_msgs::msg::TransformStamped transformStamped;
                     transformStamped.header.stamp = msg.header.stamp;
-                    transformStamped.header.frame_id = "odom";
-                    transformStamped.child_frame_id = "map";
+                    transformStamped.header.frame_id = odom_frame_;
+                    transformStamped.child_frame_id = map_frame_;
                     transformStamped.transform.translation.x = msg.pose.pose.position.x;
                     transformStamped.transform.translation.y = msg.pose.pose.position.y;
                     transformStamped.transform.translation.z = msg.pose.pose.position.z;
@@ -2019,6 +2021,8 @@ public:
 
     #ifdef ROS2
         rclcpp::Node::SharedPtr node_;
+        std::string odom_frame_;
+        std::string map_frame_;
         rclcpp::Publisher<ros::Imu>::SharedPtr imu_pub_;
         rclcpp::Publisher<ros::Image>::SharedPtr rgb_pub_;
         rclcpp::Publisher<ros::PointCloud2>::SharedPtr cloud_pub_;

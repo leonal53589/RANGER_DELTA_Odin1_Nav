@@ -131,3 +131,13 @@ RViz2 启动后，等 `Navigation` 显示 `active`。用 `Nav2 Goal` 在隔墙�
   - 纯向右横移 ($v_y < 0$): 舵角设为 `-pi/2` (CAN `-1571`，轮子转到 `+90°`)，速度下发正值。
   - 纯向左横移 ($v_y > 0$): 舵角同样设为 `-pi/2` (CAN `-1571`，轮子转到 `+90°`)，速度下发负值（反向驱动）。
 - 彻底杜绝向左横移时向舵轮下发 `+1571` 撞击 `-30°` 极限导致的斜向窜动，实现向左向右均保持横向纯平移。
+
+## Odin1 实车建图与导航接入（待装车验证）
+
+- **实车入口默认只读。** `real_slam.launch.py` 和 `real_navigation.launch.py` 的 `enable_control` 默认关闭。导航要求显式传入场地地图 `map`。静态 `map → odom` 只用于只读联调，实车导航由定位节点发布。控制器和底盘桥采用首测上限 `0.15 m/s`、`0.30 rad/s`。
+- **TF 与点云。** 底盘负责 `odom → base_link`，`base_link` 位于底盘里程计参考点的地面投影。安装后同时传入 `sensor_x`、`sensor_y`、`sensor_z`，单位为米，方向为前、左、上。必要时传 `sensor_roll`、`sensor_pitch`、`sensor_yaw`，单位为弧度。两个实车入口共用模型，按实测值直接发布 `base_link → lidar`。Costmap 订阅 `/odin1/cloud_raw`，建图累加 `/odin1/cloud_slam`，其帧为独立的 `odin_odom`。
+- **原车模型与上装。** 使用由 `dependencies.repos` 固定版本的松灵 Delta URDF 和网格。原厂前舵轮位于 `−X`，轮底位于 `Z=0`。通过零平移、偏航 `π` 的固定关节将原厂模型对齐到导航的 `base_link`。临时上装按整车总高 `1.30 m`、外包络半径 `0.58 m` 建模，两个实车 costmap 使用同一半径。装车后实测总高及俯视最外缘，更新 [Xacro](../src/ranger_delta_bringup/urdf/ranger_delta.urdf.xacro) 和 [Nav2 参数](../src/odin_nav_sim/config/nav2_real.yaml)。
+- **栅格导出。** 用 `ros2 run odin_slam pcd_to_gridmap.py -i maps/1.pcd -d maps -n real_map` 生成地图。高度阈值按 PCD 的地面高度调整。灰度 205 在 Humble 中读取为未知，实车规划禁走未知区。由示例 PCD 派生的临时栅格已清理。实车地图需要检查墙体、门洞和已知空闲区是否连贯。
+- **下一步验收。** 测量 `base_link → lidar` 外参，在 RViz 核对墙面、低障碍和传感器视野，检查障碍物移走后的清除效果。建图后验证场地地图和全局重定位，再进行实车导航验收。
+- **台架点云显示。** `real_slam.launch.py` 注册独立的 `odin_odom → odin_odom_origin` 静态 TF。RViz 的 Fixed Frame 设为 `odin_odom` 查看 `/odin1/cloud_slam`。底盘仍使用独立的 `odom → base_link`。
+- **台架验收通过。** 底盘正常待机，电压 `26.4 V`，`/odom` 约 `47.5 Hz`，静止 TF 稳定。SLAM 点云约 `10 Hz`，独立静态 TF 可查询。补齐 SDK 头文件的 `buffer_List_t.format` 后，真机原始点云恢复到约 `10.23 Hz`，`frame_id` 为 `lidar`。Odin1 装车后的外参与自主导航待验收。

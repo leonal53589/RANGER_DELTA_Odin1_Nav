@@ -217,6 +217,7 @@ typedef struct {
     void* pAddr;
     uint32_t width;
     uint32_t height;
+    uint32_t format;  /**< Pixel format: 0=NV12, 1=MJPEG; 0 for non-RGB frames. */
 } buffer_List_t;
 
 typedef struct capture_Image_List_t {

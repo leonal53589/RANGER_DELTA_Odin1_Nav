@@ -14,7 +14,7 @@ project_slam/
 │   ├── odin_cloud_cleaner/    # 留形点云去噪与自车遮挡剔除预处理节点（备用）
 │   ├── odin_nav_sim/          # Nav2 导航仿真
 │   ├── ranger_delta_bringup/  # RANGER DELTA 底盘接口
-│   └── vendor/ranger_ros2/    # 由 dependencies.repos 固定版本的松灵源码
+│   └── vendor/               # 松灵 ROS 2 驱动与原厂 Delta 模型
 ├── maps/                      # 建图结果保存目录（自动生成 0.pcd, 1.pcd...）
 ├── dependencies.repos         # 第三方源码的仓库地址与版本
 └── README.md
@@ -47,7 +47,7 @@ sudo udevadm trigger
 
 ## 三、编译工作空间
 
-新检出工作空间时，进入项目根目录并恢复固定版本的松灵源码。
+新检出工作空间时，进入项目根目录并恢复固定版本的松灵驱动和 Delta 模型。ROS 2 描述包会安装原厂 URDF 和网格所需的资产。
 
 ```bash
 cd /home/leona/WorkingSpace/navigation2/project_slam

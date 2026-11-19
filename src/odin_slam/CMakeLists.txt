@@ -57,6 +57,11 @@ install(
 )
 
 install(
+  PROGRAMS scripts/pcd_to_gridmap.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
