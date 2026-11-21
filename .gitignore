@@ -28,3 +28,8 @@ __pycache__/
 
 # Media / temporary images
 image/
+
+# Local ODIN1 capture data. Keep the Nav2 grid and relocalization settings.
+/maps/odin_*/1.pcd
+/maps/odin_*/map.bin
+/maps/odin_*/odin_mapping.yaml

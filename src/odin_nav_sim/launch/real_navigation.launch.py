@@ -1,10 +1,12 @@
 from pathlib import Path
 
+import yaml
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -19,9 +21,15 @@ def launch_setup(context):
     launch_rviz = LaunchConfiguration('launch_rviz').perform(context) == 'true'
     publish_map_odom_tf = LaunchConfiguration('publish_map_odom_tf').perform(context) == 'true'
     map_yaml_file = LaunchConfiguration('map').perform(context)
+    odin_relocalization_config = LaunchConfiguration('odin_relocalization_config').perform(context)
+    odin_reference_pcd = LaunchConfiguration('odin_reference_pcd').perform(context)
 
     if enable_control and publish_map_odom_tf:
         raise ValueError('Static map alignment is available only with enable_control:=false')
+    if odin_relocalization_config and publish_map_odom_tf:
+        raise ValueError('Odin relocalization and static alignment both publish map -> odom')
+    if odin_reference_pcd and (not odin_relocalization_config or not Path(odin_reference_pcd).is_file()):
+        raise ValueError('odin_reference_pcd requires a saved PCD and ODIN1 relocalization')
     if enable_control and not all(
         LaunchConfiguration(f'sensor_{axis}').perform(context) for axis in ('x', 'y', 'z')
     ):
@@ -30,6 +38,19 @@ def launch_setup(context):
         raise ValueError(f'Map YAML is missing: {map_yaml_file}')
 
     driver_config = PathJoinSubstitution([pkg_odin_driver, 'config', 'control_command_robot.yaml'])
+    odin_tf_remappings = []
+    if odin_relocalization_config:
+        config_path = Path(odin_relocalization_config).expanduser().resolve()
+        with config_path.open(encoding='utf-8') as config_file:
+            keys = yaml.safe_load(config_file)['register_keys']
+        for key, value in (('custom_map_mode', 2), ('sendodom', 1), ('send_odom_baselink_tf', 1)):
+            if keys.get(key) != value:
+                raise ValueError(f'{config_path}: set {key} to {value} for Odin relocalization')
+        device_map = Path(keys.get('relocalization_map_abs_path') or '')
+        if not device_map.is_absolute() or not device_map.is_file():
+            raise ValueError(f'{config_path}: relocalization_map_abs_path must point to the saved Odin map')
+        driver_config = str(config_path)
+        odin_tf_remappings = [('/tf', '/odin1/tf'), ('/tf_static', '/odin1/tf_static')]
     nav2_params = PathJoinSubstitution([pkg_nav, 'config', 'nav2_real.yaml'])
     rviz_config = PathJoinSubstitution([pkg_nav, 'rviz', 'navigation_sim.rviz'])
 
@@ -53,6 +74,7 @@ def launch_setup(context):
             output='screen',
             parameters=[
                 PathJoinSubstitution([pkg_chassis, 'config', 'safe_command.yaml']),
+                nav2_params,
                 {
                     'enable_control': enable_control,
                     'can_interface': can_interface,
@@ -67,6 +89,7 @@ def launch_setup(context):
             name='host_sdk_sample',
             output='screen',
             parameters=[{'config_file': driver_config, 'odom_frame': 'odin_odom', 'map_frame': 'odin_map'}],
+            remappings=odin_tf_remappings,
         ),
 
         # 6. 地图服务器 (加载 2D OccupancyGrid 地图)
@@ -96,8 +119,22 @@ def launch_setup(context):
         ),
     ]
 
-    # 可选: 全局定位 TF (在无独立重定位节点时提供 map -> odom 原点基准)
-    if publish_map_odom_tf:
+    # Only one source may publish the global map -> odom transform.
+    if odin_relocalization_config:
+        nodes.append(Node(
+            package='odin_nav_sim',
+            executable='odin_localization',
+            name='odin_localization',
+            output='screen',
+            parameters=[
+                {
+                    name: ParameterValue(LaunchConfiguration(name), value_type=float)
+                    for name in ('odin_map_x', 'odin_map_y', 'odin_map_yaw')
+                },
+                {'odin_reference_pcd': ParameterValue(odin_reference_pcd, value_type=str)},
+            ],
+        ))
+    elif publish_map_odom_tf:
         nodes.append(
             Node(
                 package='tf2_ros',
@@ -130,6 +167,11 @@ def generate_launch_description():
         DeclareLaunchArgument('can_interface', default_value='can0', description='SocketCAN 接口名'),
         DeclareLaunchArgument('enable_control', default_value='false', choices=['true', 'false'], description='是否允许向底盘下发控制指令'),
         DeclareLaunchArgument('publish_map_odom_tf', default_value='false', choices=['true', 'false'], description='只读联调时发布静态 map → odom'),
+        DeclareLaunchArgument('odin_relocalization_config', default_value='', description='ODIN1 重定位配置 YAML 路径'),
+        DeclareLaunchArgument('odin_reference_pcd', default_value='', description='用于复核地图校正的同次采图二进制 PCD'),
+        DeclareLaunchArgument('odin_map_x', default_value='0.0', description='ODIN1 地图原点在导航 map 中的 X（米）'),
+        DeclareLaunchArgument('odin_map_y', default_value='0.0', description='ODIN1 地图原点在导航 map 中的 Y（米）'),
+        DeclareLaunchArgument('odin_map_yaw', default_value='0.0', description='ODIN1 地图相对导航 map 的偏航（弧度）'),
         DeclareLaunchArgument('launch_rviz', default_value='true', choices=['true', 'false'], description='是否启动 RViz2 导航面板'),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(description)),
         OpaqueFunction(function=launch_setup),

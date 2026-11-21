@@ -180,9 +180,10 @@ def main():
         print(f"\033[31m错误: 文件不存在: {args.input}\033[0m")
         sys.exit(1)
 
-    xs, ys, zs = parse_pcd(args.input)
+    xs, ys, zs = parse_pcd(args.input)  # 读出每个点的 X、Y、Z（把文件读成三列坐标）
     print(f"  读取到 {len(xs)} 个有效点云坐标")
 
+    # 用 Z 判断点的类别，用 X、Y 决定落在哪个格子，也即用高度选点，再把点投到地面
     grid, x_min, y_min, res = pcd_to_grid(
         xs, ys, zs,
         resolution=args.resolution,
@@ -192,6 +193,7 @@ def main():
         margin=args.margin,
     )
 
+    # 把格子写成 PGM，把地图坐标信息写成 YAML，输出图像和坐标信息
     save_nav2_map(grid, x_min, y_min, res, args.output_dir, args.name)
     print("\n地图转换完成。用 Nav2 map_server 加载后检查空闲区是否连续。")
 

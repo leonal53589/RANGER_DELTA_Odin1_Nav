@@ -38,6 +38,7 @@ def generate_launch_description():
     ])
 
     # Driver launch
+    # IncludeLaunchDescription 把另一个 launch 文件纳入本次启动
     driver_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -68,10 +69,13 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('launch_rviz'))
     )
 
+    # odin1设备 - > host_sdk_sample驱动 - > /odin1/cloud_slam
+    # /odin1/cloud_slam -> RViz2 显示点云
+    # /odin1/cloud_slam -> odin_slam_node 收到点云 -> 运行后开始累加，保存写盘 -> PCD文件
     return LaunchDescription([
         launch_driver_arg,
         launch_rviz_arg,
-        driver_launch,
-        slam_node,
-        rviz_node
+        driver_launch,  # 这里包含 odin1_ros2.launch.py，其中的 host_sdk_sample 是 Odin1 驱动的主程序
+        slam_node,      # Node 启动 odin_slam_node 可执行程序，并把 odin_slam.yaml 传给它
+        rviz_node       # 启动 RViz2，并用 -d 加载 odin_ros2.rviz，由该文件决定订阅哪些话题、使用哪个固定坐标系
     ])

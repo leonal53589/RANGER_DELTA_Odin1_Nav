@@ -14,11 +14,19 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('launch_rviz', default_value='true'),
         DeclareLaunchArgument('mode_switch_delay', default_value='0.35'),
+        DeclareLaunchArgument('map', default_value=PathJoinSubstitution([package, 'maps', 'wall.yaml'])),
+        DeclareLaunchArgument('params_file', default_value=PathJoinSubstitution([package, 'config', 'nav2.yaml'])),
+        DeclareLaunchArgument('initial_x', default_value='0.0'),
+        DeclareLaunchArgument('initial_y', default_value='0.0'),
+        DeclareLaunchArgument('initial_yaw', default_value='0.0'),
         Node(
             package='odin_nav_sim', executable='simulated_base', output='screen',
             parameters=[{
                 'mode_switch_delay': ParameterValue(
                     LaunchConfiguration('mode_switch_delay'), value_type=float),
+                'initial_x': ParameterValue(LaunchConfiguration('initial_x'), value_type=float),
+                'initial_y': ParameterValue(LaunchConfiguration('initial_y'), value_type=float),
+                'initial_yaw': ParameterValue(LaunchConfiguration('initial_yaw'), value_type=float),
             }],
         ),
         Node(
@@ -27,7 +35,7 @@ def generate_launch_description():
         ),
         Node(
             package='nav2_map_server', executable='map_server', name='map_server',
-            parameters=[{'yaml_filename': PathJoinSubstitution([package, 'maps', 'wall.yaml'])}],
+            parameters=[{'yaml_filename': LaunchConfiguration('map')}],
         ),
         Node(
             package='nav2_lifecycle_manager', executable='lifecycle_manager',
@@ -36,7 +44,7 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([nav2, 'launch', 'navigation_launch.py'])),
             launch_arguments={
-                'params_file': PathJoinSubstitution([package, 'config', 'nav2.yaml']),
+                'params_file': LaunchConfiguration('params_file'),
             }.items(),
         ),
         Node(

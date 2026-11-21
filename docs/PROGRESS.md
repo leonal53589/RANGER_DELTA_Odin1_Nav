@@ -1,4 +1,4 @@
-# ODIN1 建图与导航进度（2026-11-18）
+# ODIN1 建图与导航进度
 
 ## 已实测
 
@@ -132,12 +132,49 @@ RViz2 启动后，等 `Navigation` 显示 `active`。用 `Nav2 Goal` 在隔墙�
   - 纯向左横移 ($v_y > 0$): 舵角同样设为 `-pi/2` (CAN `-1571`，轮子转到 `+90°`)，速度下发负值（反向驱动）。
 - 彻底杜绝向左横移时向舵轮下发 `+1571` 撞击 `-30°` 极限导致的斜向窜动，实现向左向右均保持横向纯平移。
 
-## Odin1 实车建图与导航接入（待装车验证）
+## ODIN1 实车导航复测（2026-11-21）
 
-- **实车入口默认只读。** `real_slam.launch.py` 和 `real_navigation.launch.py` 的 `enable_control` 默认关闭。导航要求显式传入场地地图 `map`。静态 `map → odom` 只用于只读联调，实车导航由定位节点发布。控制器和底盘桥采用首测上限 `0.15 m/s`、`0.30 rad/s`。
-- **TF 与点云。** 底盘负责 `odom → base_link`，`base_link` 位于底盘里程计参考点的地面投影。安装后同时传入 `sensor_x`、`sensor_y`、`sensor_z`，单位为米，方向为前、左、上。必要时传 `sensor_roll`、`sensor_pitch`、`sensor_yaw`，单位为弧度。两个实车入口共用模型，按实测值直接发布 `base_link → lidar`。Costmap 订阅 `/odin1/cloud_raw`，建图累加 `/odin1/cloud_slam`，其帧为独立的 `odin_odom`。
-- **原车模型与上装。** 使用由 `dependencies.repos` 固定版本的松灵 Delta URDF 和网格。原厂前舵轮位于 `−X`，轮底位于 `Z=0`。通过零平移、偏航 `π` 的固定关节将原厂模型对齐到导航的 `base_link`。临时上装按整车总高 `1.30 m`、外包络半径 `0.58 m` 建模，两个实车 costmap 使用同一半径。装车后实测总高及俯视最外缘，更新 [Xacro](../src/ranger_delta_bringup/urdf/ranger_delta.urdf.xacro) 和 [Nav2 参数](../src/odin_nav_sim/config/nav2_real.yaml)。
-- **栅格导出。** 用 `ros2 run odin_slam pcd_to_gridmap.py -i maps/1.pcd -d maps -n real_map` 生成地图。高度阈值按 PCD 的地面高度调整。灰度 205 在 Humble 中读取为未知，实车规划禁走未知区。由示例 PCD 派生的临时栅格已清理。实车地图需要检查墙体、门洞和已知空闲区是否连贯。
-- **下一步验收。** 测量 `base_link → lidar` 外参，在 RViz 核对墙面、低障碍和传感器视野，检查障碍物移走后的清除效果。建图后验证场地地图和全局重定位，再进行实车导航验收。
-- **台架点云显示。** `real_slam.launch.py` 注册独立的 `odin_odom → odin_odom_origin` 静态 TF。RViz 的 Fixed Frame 设为 `odin_odom` 查看 `/odin1/cloud_slam`。底盘仍使用独立的 `odom → base_link`。
-- **台架验收通过。** 底盘正常待机，电压 `26.4 V`，`/odom` 约 `47.5 Hz`，静止 TF 稳定。SLAM 点云约 `10 Hz`，独立静态 TF 可查询。补齐 SDK 头文件的 `buffer_List_t.format` 后，真机原始点云恢复到约 `10.23 Hz`，`frame_id` 为 `lidar`。Odin1 装车后的外参与自主导航待验收。
+- 已用 ODIN1 的 `map.bin` 重定位，Nav2 加载同场地的 `chair_nav.yaml`。定位桥发布 `map → odom`，底盘发布 `odom → base_link`。局部和全局代价地图仍使用 `/odin1/cloud_raw`。
+- 双轮一侧为车头 `+X`，单轮在车尾。雷达外参初值为 `xyz=(0.195, 0, 0.823) m`、`rpy=(0, 0, 0)`。三轮等速自旋的理论中心在 `base_link` 前方约 43 mm，实际旋转中心和安装外参仍待独立测量。 [车体模型](../src/ranger_delta_bringup/urdf/ranger_delta.urdf.xacro)
+- 绕椅子调试用居中路径、0.22 m 前视距离和 0.04 m/s 线速度上限，分两段走完约 2.30 m，并在 0.10 m 到点容差内停稳。标准 RViz 入口加载 [实车默认参数](../src/odin_nav_sim/config/nav2_real.yaml)，由 Nav2 根据当前代价地图规划。
+- 最新 RViz 实测省略 `odin_reference_pcd` 后，4 次目标有 3 次成功，1 次报 `Failed to make progress`。启用参考 PCD 时曾出现 ODIN1 报重定位成功、定位桥仍未发布 `map → odom`，以及行驶中 TF 过期。参考 PCD 复核在回放中拦截过约 13 cm 的错误校正，但实时点云与旧图重叠不足时也会阻止 TF 更新。当前场地用下面的实测命令，点目标前先核对车位、朝向和障碍对齐。
+
+### 终端 1 启动导航
+
+底盘和 ODIN1 上电，先关闭之前单独启动的 ODIN1、底盘反馈和导航节点。用 `ip -details link show can0` 检查 CAN 接口，未启用时运行 `sudo ip link set dev can0 up type can bitrate 500000`。
+
+实车重定位需要同次采集的本地 `map.bin`。换电脑时把它复制到地图目录，并把 `odin_relocalization.yaml` 里的 `relocalization_map_abs_path` 更新为本机绝对路径。参考点云 `1.pcd` 只在启用复核时需要。
+
+```bash
+cd /home/leona/WorkingSpace/navigation2/project_slam
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=44 ROS_LOCALHOST_ONLY=1 PYTHONNOUSERSITE=1
+MAP_DIR="$PWD/maps/odin_20261120_211404_hXDu4s"
+
+ros2 launch odin_nav_sim real_navigation.launch.py \
+  map:="$MAP_DIR/chair_nav.yaml" \
+  odin_relocalization_config:="$MAP_DIR/odin_relocalization.yaml" \
+  sensor_x:=0.195 sensor_y:=0.0 sensor_z:=0.823 \
+  can_interface:=can0 enable_control:=true launch_rviz:=true
+```
+
+### 终端 2 停车验收
+
+```bash
+cd /home/leona/WorkingSpace/navigation2/project_slam
+source install/setup.bash
+export ROS_DOMAIN_ID=44 ROS_LOCALHOST_ONLY=1 PYTHONNOUSERSITE=1
+
+timeout 5s ros2 topic echo /system_status --once
+timeout 5s ros2 run tf2_ros tf2_echo map base_link
+ros2 lifecycle get /controller_server
+```
+
+确认底盘状态正常、TF 持续更新、控制器为 `active`。在 RViz 的 `map` 固定坐标系下核对车头和障碍位置，再用 **Nav2 Goal** 点空地目标并拖出期望朝向。先发一个短目标，确认到点和停车。
+
+### 常见中断
+
+- **缺少 `map` 或出现 TF 外推。** 分别查 `odom → base_link` 和 `map → odom`。ODIN1 的 `relocalization success` 后还要看到定位桥的 `Publishing map -> odom`。TF 恢复连续更新后再发新目标。静态 `map → odom` 入口只供停车联调。
+- **无路径或拐弯贴近障碍。** 在 RViz 检查全局代价地图的目标和沿途通道，必要时分段点通道中央。可在控制器激活后、发目标前用 `ros2 param set /controller_server FollowPath.lookahead_dist 0.22` 和 `ros2 param set /controller_server FollowPath.desired_linear_vel 0.04` 临时复查短前视、低速的效果。
+- **`Failed to make progress`。** 当前默认要求 15 秒内平移至少 0.15 m。低速原地转向可能触发，先结合 `/odom` 和 `/cmd_vel` 判断是转向还是卡住。 [Nav2 配置](../src/odin_nav_sim/config/nav2_real.yaml)

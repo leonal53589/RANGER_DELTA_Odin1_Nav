@@ -35,7 +35,7 @@ OdinSlamNode::OdinSlamNode(const std::string &node)
 
 void OdinSlamNode::run_slam()
 {
-    m_acc_cloud->clear();
+    m_acc_cloud->clear();   // 清空上次累计点云
 
     m_acc_flag = true;
     RCLCPP_INFO(this->get_logger(), "SLAM started. Cloud cleared.");
@@ -52,7 +52,7 @@ void OdinSlamNode::save_result()
     if (m_acc_cloud->empty())
         return;
 
-    // 1. CropBox Filter
+    // 1. CropBox Filter（CropBox 裁剪）
     double min_x = this->get_parameter("cropbox.min_x").as_double();
     double min_y = this->get_parameter("cropbox.min_y").as_double();
     double min_z = this->get_parameter("cropbox.min_z").as_double();
@@ -73,7 +73,7 @@ void OdinSlamNode::save_result()
         return;
     }
 
-    // 2. VoxelGrid Filter
+    // 2. VoxelGrid Filter（VoxelGrid 整体降采样）
     double leaf_size = this->get_parameter("voxel.leaf_size").as_double();
     
     PointCloudPtr cloud_voxel = std::make_shared<PointCloud>();
@@ -88,7 +88,7 @@ void OdinSlamNode::save_result()
         return;
     }
 
-    // 3. StatisticalOutlierRemoval Filter
+    // 3. StatisticalOutlierRemoval Filter（StatisticalOutlierRemoval 去离群点）
     int mean_k = this->get_parameter("sor.mean_k").as_int();
     double stddev = this->get_parameter("sor.stddev_mul_thresh").as_double();
     
@@ -105,6 +105,7 @@ void OdinSlamNode::save_result()
         return;
     }
 
+    // 写二进制 PCD 文件
     std::filesystem::path pcd_path = this->get_parameter("save_pcd_path").as_string();
     std::filesystem::create_directories(pcd_path);
     pcd_path /= std::to_string(m_save_counter) + ".pcd";
@@ -118,18 +119,20 @@ void OdinSlamNode::save_result()
         RCLCPP_ERROR(this->get_logger(), "Failed to save PCD file to: %s", pcd_path.c_str());
 }
 
+// 接收和处理 ROS 消息格式的点云数据
 void OdinSlamNode::on_receive_cloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg)
 {
     if (m_acc_flag)
     {
         PointCloudPtr frame = std::make_shared<PointCloud>();
-        pcl::fromROSMsg(*msg, *frame);
+        pcl::fromROSMsg(*msg, *frame);  // 把 ROS 消息转成 PCL 的 PointXYZ，本节点后续只处理 XYZ
 
         PointCloudPtr no_nan_cloud = std::make_shared<PointCloud>();
         pcl::Indices indices;
-        pcl::removeNaNFromPointCloud(*frame, *no_nan_cloud, indices);
+        pcl::removeNaNFromPointCloud(*frame, *no_nan_cloud, indices);   // 剔除坐标无效的点
 
         // 对单帧进行体素滤波降采样
+        // 按边长 2 cm 的体素对当前帧降采样。可以想象把空间划成小立方格，同一格里的点用它们的质心代表
         double leaf_size = this->get_parameter("voxel.leaf_size").as_double();
         PointCloudPtr filtered_frame = std::make_shared<PointCloud>();
         pcl::VoxelGrid<pcl::PointXYZ> voxel_grid;
@@ -138,6 +141,6 @@ void OdinSlamNode::on_receive_cloud(const sensor_msgs::msg::PointCloud2::ConstSh
         voxel_grid.filter(*filtered_frame);
 
         if (!filtered_frame->empty())
-            *m_acc_cloud += *filtered_frame;
+            *m_acc_cloud += *filtered_frame;    // 把这一帧留下的点追加到累计点云
     }
 }

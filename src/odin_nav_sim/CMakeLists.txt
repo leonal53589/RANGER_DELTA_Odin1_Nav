@@ -6,7 +6,17 @@ find_package(ament_cmake REQUIRED)
 install(PROGRAMS scripts/simulated_base.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME simulated_base)
+install(PROGRAMS scripts/odin_localization.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME odin_localization)
+install(FILES scripts/odin_reference_cloud.py DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch maps rviz
   DESTINATION share/${PROJECT_NAME})
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(odin_localization test/test_odin_localization.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
+endif()
 
 ament_package()

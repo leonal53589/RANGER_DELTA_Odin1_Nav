@@ -50,9 +50,10 @@ def launch_setup(context):
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('sensor_x', default_value='', description='LiDAR origin forward from base_link (m)'),
-        DeclareLaunchArgument('sensor_y', default_value='', description='LiDAR origin left of base_link (m)'),
-        DeclareLaunchArgument('sensor_z', default_value='', description='LiDAR origin above base_link (m)'),
+        # Measured Odin1 mount. The lateral offset and angles are initial estimates.
+        DeclareLaunchArgument('sensor_x', default_value='0.195', description='LiDAR origin forward from base_link (m)'),
+        DeclareLaunchArgument('sensor_y', default_value='0.0', description='LiDAR origin left of base_link (m)'),
+        DeclareLaunchArgument('sensor_z', default_value='0.823', description='LiDAR origin above base_link (m)'),
         DeclareLaunchArgument('sensor_roll', default_value='0.0', description='LiDAR mounting roll (rad)'),
         DeclareLaunchArgument('sensor_pitch', default_value='0.0', description='LiDAR mounting pitch (rad)'),
         DeclareLaunchArgument('sensor_yaw', default_value='0.0', description='LiDAR mounting yaw (rad)'),

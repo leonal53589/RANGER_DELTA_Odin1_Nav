@@ -993,6 +993,7 @@ static void lidar_data_callback(const lidar_data_t *data, void *user_data)
 
     double total_mb = 0.0;
 
+    // 数据回调按类型分流，发布函数负责打包
     switch(data->type) {
         case LIDAR_DT_NONE:
             printf("empty lidar data type: %x\n", data->type);
@@ -1018,7 +1019,15 @@ static void lidar_data_callback(const lidar_data_t *data, void *user_data)
             }
             update_count(&imu_rx_fps);
             break;
+        /**
+         * 举个例子：
+         *  时刻	        cloud_raw 里的墙点	    cloud_slam 里的墙点
+            起点	        在雷达前方 5 米	        在里程计原点前方 5 米
+            向前走 2 米后	 在雷达前方 3 米	     仍在里程计原点前方约 5 米
+        */
+        // /odin1/cloud_raw，帧名 lidar，坐标随传感器移动。实车 Nav2 的障碍物层用它更新实时障碍，相对于当前雷达
         case LIDAR_DT_RAW_DTOF:
+            // 读取原始测距点，重新排列坐标轴并换算成米，把 XYZ、强度等字段打包成 PointCloud2
             if (g_senddtof ) {
                 g_ros_object->publishIntensityCloud((capture_Image_List_t *)&data->stream, 1);
             }
@@ -1027,8 +1036,10 @@ static void lidar_data_callback(const lidar_data_t *data, void *user_data)
             }
             update_count(&dtof_rx_fps);
             break;
+        // /odin1/cloud_slam，帧名是 odom，建图节点用它累加点云，相对于设备的里程计原点
         case LIDAR_DT_SLAM_CLOUD:
             if (g_sendcloudslam) {
+                // 读取设备给出的 XYZ 和颜色
                 g_ros_object->publishPC2XYZRGBA((capture_Image_List_t *)&data->stream, 0);
             }
             update_count(&slam_cloud_rx_fps);
@@ -1266,6 +1277,7 @@ static void lidar_data_callback(const lidar_data_t *data, void *user_data)
     }
 }
 
+// 设备回调
 static void lidar_device_callback(const lidar_device_info_t* device, bool attach)
 {
     int type = LIDAR_MODE_SLAM;
@@ -1279,6 +1291,7 @@ static void lidar_device_callback(const lidar_device_info_t* device, bool attach
         #else
             ROS_INFO("Hardware connected, starting software connection...");
         #endif
+        // 是否连接到USB3.0
         if (!isUsb3OrHigher(TARGET_VENDOR, TARGET_PRODUCT)) {
             #ifdef ROS2
                 RCLCPP_FATAL(rclcpp::get_logger("device_cb"), 
@@ -1817,7 +1830,8 @@ static void lidar_device_callback(const lidar_device_info_t* device, bool attach
                 #endif
             }
         }
- 
+
+        // 注册数据回调
         lidar_data_callback_info_t data_callback_info;
         data_callback_info.data_callback = lidar_data_callback;
         data_callback_info.user_data = &odinDevice;
@@ -1888,6 +1902,7 @@ static void lidar_device_callback(const lidar_device_info_t* device, bool attach
                 g_sendrgb, g_sendimu, g_sendodom, g_senddtof, g_sendcloudslam);
         #endif
         
+        // 按配置启用数据流
         if (g_sendrgb) {
             lidar_activate_stream_type(odinDevice, LIDAR_DT_RAW_RGB);
         } else {
@@ -1956,6 +1971,7 @@ static void lidar_device_callback(const lidar_device_info_t* device, bool attach
             #endif
         }
 
+        // 就绪日志
         #ifdef ROS2
             RCLCPP_INFO(rclcpp::get_logger("device_cb"), "Software connection successful in %ld seconds", 
                        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - software_connect_start).count());
@@ -2261,6 +2277,7 @@ int main(int argc, char *argv[])
             ROS_INFO("Command file path set to: %s", g_command_file_path.c_str());
         #endif
 
+        // 读取配置文件
         g_parser = std::make_shared<odin_ros_driver::YamlParser>(config_file);
         if (!g_parser->loadConfig()) {
             #ifdef ROS2
@@ -2391,6 +2408,8 @@ int main(int argc, char *argv[])
             std::filesystem::create_directories(map_root_dir_);
         }
 
+        // 初始化SDK，SDK 在设备接入或断开时调用它
+        // 设备回调打开设备，注册数据回调
         if (lidar_system_init(lidar_device_callback)) {
             #ifdef ROS2
                 RCLCPP_ERROR(node->get_logger(), "Lidar system init failed");

@@ -6,18 +6,18 @@
   <xacro:arg name="sensor_xyz" default="" />
   <xacro:arg name="sensor_rpy" default="0 0 0" />
 
-  <!-- The official wheel meshes touch Z=0. The front wheel lies along -X. -->
+  <!-- The robot faces the two-wheel side (+X). The single wheel is at -X. -->
   <link name="base_link" />
   <joint name="base_to_agilex" type="fixed">
     <parent link="base_link" />
     <child link="agilex_base_link" />
-    <origin xyz="0 0 0" rpy="0 0 ${pi}" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
   </joint>
 
   <!-- Provisional payload envelope until the completed vehicle is measured. -->
   <xacro:property name="chassis_top" value="0.263" />
   <xacro:property name="overall_height" value="1.30" />
-  <xacro:property name="payload_radius" value="0.58" />
+  <xacro:property name="payload_radius" value="0.40" />
   <xacro:property name="payload_height" value="${overall_height - chassis_top}" />
   <link name="upper_payload_link">
     <visual>
