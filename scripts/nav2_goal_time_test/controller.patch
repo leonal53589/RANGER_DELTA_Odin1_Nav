@@ -1,0 +1,109 @@
+--- a/src/controller_server.cpp
++++ b/src/controller_server.cpp
+@@ -13,12 +13,14 @@
+ // limitations under the License.
+ 
+ #include <chrono>
++#include <cmath>
+ #include <vector>
+ #include <memory>
+ #include <string>
+ #include <utility>
+ #include <limits>
+ 
++#include "angles/angles.h"
+ #include "lifecycle_msgs/msg/state.hpp"
+ #include "nav2_core/exceptions.hpp"
+ #include "nav_2d_utils/conversions.hpp"
+@@ -26,6 +28,8 @@
+ #include "nav2_util/node_utils.hpp"
+ #include "nav2_util/geometry_utils.hpp"
+ #include "nav2_controller/controller_server.hpp"
++#include "rcl_interfaces/msg/parameter_descriptor.hpp"
++#include "tf2/utils.h"
+ 
+ using namespace std::chrono_literals;
+ using rcl_interfaces::msg::ParameterType;
+@@ -61,6 +65,11 @@
+ 
+   declare_parameter("failure_tolerance", rclcpp::ParameterValue(0.0));
+   declare_parameter("publish_zero_velocity", rclcpp::ParameterValue(true));
++  rcl_interfaces::msg::ParameterDescriptor startup_only;
++  startup_only.read_only = true;
++  declare_parameter("align_goal_tf_time", false, startup_only);
++  declare_parameter("trace_goal_tf_time", false, startup_only);
++  declare_parameter("aligned_goal_checker_id", std::string{}, startup_only);
+ 
+   // The costmap node is used in the implementation of the controller
+   costmap_ros_ = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+@@ -596,15 +605,61 @@
+   nav_2d_msgs::msg::Twist2D twist = getThresholdedTwist(odom_sub_->getTwist());
+   geometry_msgs::msg::Twist velocity = nav_2d_utils::twist2Dto3D(twist);
+ 
+-  geometry_msgs::msg::PoseStamped transformed_end_pose;
+-  rclcpp::Duration tolerance(rclcpp::Duration::from_seconds(costmap_ros_->getTransformTolerance()));
+-  nav_2d_utils::transformPose(
+-    costmap_ros_->getTfBuffer(), costmap_ros_->getGlobalFrameID(),
+-    end_pose_, transformed_end_pose, tolerance);
+-
+-  return goal_checkers_[current_goal_checker_]->isGoalReached(
+-    pose.pose, transformed_end_pose.pose,
+-    velocity);
++  const auto aligned_checker_id = get_parameter("aligned_goal_checker_id").as_string();
++  const bool align = get_parameter("align_goal_tf_time").as_bool() ||
++    (!aligned_checker_id.empty() && current_goal_checker_ == aligned_checker_id);
++  const bool trace = get_parameter("trace_goal_tf_time").as_bool();
++  const auto & frame = costmap_ros_->getGlobalFrameID();
++  const auto & tf = costmap_ros_->getTfBuffer();
++  const auto & checker = goal_checkers_[current_goal_checker_];
++
++  geometry_msgs::msg::PoseStamped original_goal, aligned_goal;
++  bool original_available = false;
++  if (!align || trace) {
++    auto tolerance = rclcpp::Duration::from_seconds(costmap_ros_->getTransformTolerance());
++    original_available = nav_2d_utils::transformPose(
++      tf, frame, end_pose_, original_goal, tolerance);
++  }
++  bool aligned_available = false;
++  if (align || trace) {
++    if (pose.header.stamp.sec != 0 || pose.header.stamp.nanosec != 0) {
++      auto goal_at_robot_time = end_pose_;
++      goal_at_robot_time.header.stamp = pose.header.stamp;
++      try {
++        tf->transform(goal_at_robot_time, aligned_goal, frame);
++        aligned_available = true;
++      } catch (const tf2::TransformException & error) {
++        RCLCPP_DEBUG(get_logger(), "Common-time goal TF unavailable: %s", error.what());
++      }
++    }
++  }
++
++  const bool reached = align ?
++    (aligned_available && checker->isGoalReached(pose.pose, aligned_goal.pose, velocity)) :
++    checker->isGoalReached(pose.pose, original_goal.pose, velocity);
++  if (trace) {
++    const auto xy_error = [&pose](auto & goal, bool available) {
++        return available ? std::hypot(
++          goal.pose.position.x - pose.pose.position.x,
++          goal.pose.position.y - pose.pose.position.y) : -1.0;
++      };
++    const auto yaw_error = [&pose](auto & goal, bool available) {
++        return available ? std::abs(angles::shortest_angular_distance(
++          tf2::getYaw(pose.pose.orientation), tf2::getYaw(goal.pose.orientation))) : -1.0;
++      };
++    RCLCPP_INFO(
++      get_logger(),
++      "GOAL_TIME_TRACE mode=%s robot_ns=%ld path_ns=%ld original_ns=%ld aligned_ns=%ld "
++      "original_xy_m=%.6f aligned_xy_m=%.6f original_yaw_rad=%.6f aligned_yaw_rad=%.6f reached=%d",
++      align ? "aligned" : "original",
++      static_cast<long>(rclcpp::Time(pose.header.stamp).nanoseconds()),
++      static_cast<long>(rclcpp::Time(end_pose_.header.stamp).nanoseconds()),
++      static_cast<long>(rclcpp::Time(original_goal.header.stamp).nanoseconds()),
++      static_cast<long>(rclcpp::Time(aligned_goal.header.stamp).nanoseconds()),
++      xy_error(original_goal, original_available), xy_error(aligned_goal, aligned_available),
++      yaw_error(original_goal, original_available), yaw_error(aligned_goal, aligned_available), reached);
++  }
++  return reached;
+ }
+ 
+ bool ControllerServer::getRobotPose(geometry_msgs::msg::PoseStamped & pose)

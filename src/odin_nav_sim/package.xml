@@ -8,6 +8,9 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>nav2_regulated_pure_pursuit_controller</depend>
+  <depend>pluginlib</depend>
+  <exec_depend>agx_bringup</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
@@ -17,7 +20,7 @@
   <exec_depend>nav2_bt_navigator</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
-  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
   <exec_depend>nav2_rviz_plugins</exec_depend>
   <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>odin_ros_driver</exec_depend>
@@ -26,6 +29,7 @@
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>ranger_delta_bringup</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+from collections import deque
 import math
 
+from agx_bringup.msg import MotionModeFeedback
 import PyKDL
 import rclpy
 from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -13,6 +17,7 @@ from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
 
 from odin_reference_cloud import MapCorrectionCheck
+from odin_spin_guard import ChassisMotion, SpinAlignmentGuard
 
 
 def transform_frame(transform):
@@ -58,6 +63,16 @@ class OdinLocalization(Node):
             self.create_subscription(
                 PointCloud2, '/odin1/cloud_raw', self.map_check.clouds.append, qos_profile_sensor_data,
             )
+        spin_guard_enabled = self.declare_parameter(
+            'odin_spin_guard', False, ParameterDescriptor(read_only=True),
+        ).value
+        self.spin_guard = SpinAlignmentGuard() if spin_guard_enabled else None
+        if self.spin_guard is not None:
+            self.wheel_velocities = deque(maxlen=64)
+            self.motion_modes = deque(maxlen=64)
+            self.create_subscription(Odometry, '/odom', self.receive_wheel_velocity, 30)
+            self.create_subscription(MotionModeFeedback, '/motion_mode_feedback', self.receive_motion_mode, 30)
+            self.get_logger().info('Odin spin alignment guard enabled')
         self.last_stamp = None
         self.create_timer(0.05, self.publish_alignment)
 
@@ -68,6 +83,27 @@ class OdinLocalization(Node):
     def receive_odin_tf_static(self, message):
         for transform in message.transforms:
             self.odin_tf.set_transform_static(transform, 'odin_driver')
+
+    def receive_wheel_velocity(self, message):
+        if message.header.frame_id != 'odom' or message.child_frame_id != 'base_link':
+            return
+        velocity = message.twist.twist
+        speed = math.hypot(velocity.linear.x, velocity.linear.y)
+        yaw_rate = velocity.angular.z
+        if math.isfinite(speed) and math.isfinite(yaw_rate):
+            stamp = Time.from_msg(message.header.stamp).nanoseconds
+            self.wheel_velocities.append((stamp, (speed, yaw_rate)))
+
+    def receive_motion_mode(self, message):
+        self.motion_modes.append((self.get_clock().now().nanoseconds, (message.mode, message.switch_status)))
+
+    def chassis_motion_at(self, stamp):
+        age_limit_ns = 200_000_000
+        mode = next((value for time, value in reversed(self.motion_modes)
+                     if 0 <= stamp - time <= age_limit_ns), None)
+        velocity = next((value for time, value in reversed(self.wheel_velocities)
+                         if 0 <= stamp - time <= age_limit_ns), None)
+        return ChassisMotion(*mode, *velocity) if mode is not None and velocity is not None else None
 
     def checked_lidar_pose(self, stamp):
         local = transform_frame(self.odin_tf.lookup_transform('odin_odom', 'lidar', stamp).transform)
@@ -122,10 +158,18 @@ class OdinLocalization(Node):
             self.get_logger().info(f'Waiting for localization transforms: {error}', throttle_duration_sec=3)
             return
 
+        odom_from_base = transform_frame(wheel_pose.transform)
         alignment = map_to_odom(
             self.map_from_odin_map, odin_pose,
-            transform_frame(mount.transform), transform_frame(wheel_pose.transform),
+            transform_frame(mount.transform), odom_from_base,
         )
+        if self.spin_guard is not None:
+            previous_state = self.spin_guard.state
+            alignment = self.spin_guard.update(
+                stamp.nanoseconds, alignment, odom_from_base, self.chassis_motion_at(stamp.nanoseconds),
+            )
+            if self.spin_guard.state != previous_state:
+                self.get_logger().info(f'Odin spin alignment guard: {self.spin_guard.state}')
         yaw = alignment.M.GetRPY()[2]
         transform = TransformStamped()
         transform.header.frame_id = 'map'

@@ -1,3 +1,4 @@
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -10,6 +11,7 @@ from tf2_ros import Buffer, ExtrapolationException
 
 from odin_localization import OdinLocalization
 from odin_reference_cloud import MapCorrectionCheck
+from odin_spin_guard import ChassisMotion, SpinAlignmentGuard
 
 
 def time_ms(milliseconds):
@@ -32,7 +34,7 @@ def test_newer_wheel_pose_can_use_recent_map_correction():
     clock = Mock()
     node = SimpleNamespace(
         odin_tf=odin_tf, robot_tf=robot_tf, map_from_odin_map=PyKDL.Frame(),
-        map_check=None, max_pose_age=0.5, last_stamp=None, get_clock=lambda: clock,
+        map_check=None, spin_guard=None, max_pose_age=0.5, last_stamp=None, get_clock=lambda: clock,
         get_logger=Mock(), broadcaster=Mock(),
     )
 
@@ -60,6 +62,50 @@ def test_newer_wheel_pose_can_use_recent_map_correction():
     assert node.broadcaster.sendTransform.call_count == 4
     with pytest.raises(ExtrapolationException):
         robot_tf.lookup_transform('map', 'odom', time_ms(1700))
+
+
+def planar(x=0.0, yaw=0.0):
+    return PyKDL.Frame(PyKDL.Rotation.RotZ(yaw), PyKDL.Vector(x, 0.0, 0.0))
+
+
+def test_spin_guard_holds_position_and_bounds_recovery():
+    guard = SpinAlignmentGuard()
+    start = planar()
+    guard.update(0, start, start, None)
+    spin = ChassisMotion(2, 0, 0.0, 0.10)
+    wheels = planar(yaw=0.01)
+    raw = planar(x=0.06, yaw=0.17)
+    output = guard.update(100_000_000, raw, wheels, spin) * wheels
+    assert guard.state == 'holding'
+    assert output.p.x() == pytest.approx(0)
+    assert output.M.GetRPY()[2] == pytest.approx(0.014)
+
+    stop = guard.update(200_000_000, raw, wheels, None) * wheels
+    assert stop.p.x() == pytest.approx(0)
+    drive = ChassisMotion(0, 0, 0.04, 0.0)
+    moved = wheels * planar(x=0.004)
+    recovered = guard.update(300_000_000, raw, moved, drive) * moved
+    prediction = stop * planar(x=0.004)
+    assert guard.state == 'recovering'
+    assert (recovered.p - prediction.p).Norm() == pytest.approx(0.0005)
+    assert abs(recovered.M.GetRPY()[2] - prediction.M.GetRPY()[2]) <= 0.00121
+
+    # A reset of the wheel coordinate system must not be interpreted as physical motion.
+    reset = planar(x=1.0)
+    output = guard.update(400_000_000, raw, reset, drive)
+    assert guard.state == 'tracking'
+    assert output.p.x() == pytest.approx(raw.p.x())
+
+
+def test_chassis_feedback_rejects_stale_or_future_samples():
+    node = SimpleNamespace(
+        motion_modes=[(600_000_000, (2, 0)), (1_020_000_000, (2, 0))],
+        wheel_velocities=[(950_000_000, (0.0, 0.10))],
+    )
+    assert OdinLocalization.chassis_motion_at(node, 1_000_000_000) is None
+    node.motion_modes.insert(1, (900_000_000, (2, 0)))
+    assert OdinLocalization.chassis_motion_at(node, 1_000_000_000) == ChassisMotion(2, 0, 0.0, 0.10)
+    assert math.isclose(OdinLocalization.chassis_motion_at(node, 1_100_000_000).yaw_rate, 0.10)
 
 
 def test_map_jump_requires_point_cloud_support(tmp_path):

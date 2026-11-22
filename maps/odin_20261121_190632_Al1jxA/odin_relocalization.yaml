@@ -41,7 +41,7 @@ register_keys:
   - 1.0
   custom_init_pose_search_radius: 4.0
   custom_init_pose_max_rot_deg: 180.0
-  relocalization_map_abs_path: /home/leona/WorkingSpace/navigation2/project_slam/maps/odin_20261120_211404_hXDu4s/map.bin
+  relocalization_map_abs_path: /home/leona/WorkingSpace/navigation2/project_slam/maps/odin_20261121_190632_Al1jxA/map.bin
   mapping_result_dest_dir: ''
   mapping_result_file_name: ''
   sendimagemask: 0

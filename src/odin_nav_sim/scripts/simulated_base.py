@@ -7,6 +7,7 @@ from enum import Enum
 import rclpy
 from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import Odometry
+from rclpy.duration import Duration
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
 
@@ -29,6 +30,11 @@ class SimulatedBase(Node):
         self.x = self.declare_parameter('initial_x', 0.0).value
         self.y = self.declare_parameter('initial_y', 0.0).value
         self.yaw = self.declare_parameter('initial_yaw', 0.0).value
+        self.initial_x = self.x
+        self.publish_test_map_odom = self.declare_parameter('publish_test_map_odom', False).value
+        self.test_map_odom_shift_x = self.declare_parameter('test_map_odom_shift_x', 0.0).value
+        if not math.isfinite(self.test_map_odom_shift_x):
+            raise ValueError('Test map to odom shift must be finite.')
         self.mode = MotionMode.DRIVE
         self.pending_mode = None
         self.switch_ends_at = 0.0
@@ -44,27 +50,28 @@ class SimulatedBase(Node):
     def receive_command(self, message):
         command = (message.linear.x, message.linear.y, message.angular.z)
         self.command = tuple(
-            value if math.isfinite(value) and abs(value) > 1e-4 else 0.0
+            value if math.isfinite(value) and abs(value) >= 0.001 else 0.0
             for value in command
         )
         self.last_command = time.monotonic()
 
     def applied_velocity(self, now):
         stopped = (0.0, 0.0, 0.0)
-        if now - self.last_command > self.command_timeout or self.command == stopped:
+        vx, vy, wz = self.command
+        if now - self.last_command > self.command_timeout or self.command == stopped or (vy and wz):
             self.pending_mode = None
             return stopped
 
-        vx, vy, wz = self.command
         if vy:
             requested_mode = MotionMode.CRAB
             velocity = (vx, vy, 0.0)
-        elif wz and (not vx or abs(vx / wz) < self.min_turn_radius):
+        elif wz and not vx:
             requested_mode = MotionMode.SPIN
             velocity = (0.0, 0.0, wz)
         else:
             requested_mode = MotionMode.DRIVE
-            velocity = (vx, 0.0, wz)
+            limit = abs(vx) / self.min_turn_radius if self.min_turn_radius else math.inf
+            velocity = (vx, 0.0, max(-limit, min(wz, limit)))
 
         if requested_mode == self.mode:
             self.pending_mode = None
@@ -110,7 +117,18 @@ class SimulatedBase(Node):
         transform.transform.translation.x = self.x
         transform.transform.translation.y = self.y
         transform.transform.rotation = odom.pose.pose.orientation
-        self.tf.sendTransform(transform)
+        if self.publish_test_map_odom:
+            correction = TransformStamped()
+            correction.header.frame_id = 'map'
+            correction.header.stamp = (self.get_clock().now() + Duration(seconds=0.30)).to_msg()
+            correction.child_frame_id = 'odom'
+            # Introduce the correction after 7 cm of travel and ramp it over 3 cm.
+            fraction = min(1.0, max(0.0, (self.x - self.initial_x - 0.07) / 0.03))
+            correction.transform.translation.x = self.test_map_odom_shift_x * fraction
+            correction.transform.rotation.w = 1.0
+            self.tf.sendTransform([transform, correction])
+        else:
+            self.tf.sendTransform(transform)
 
 
 def main():

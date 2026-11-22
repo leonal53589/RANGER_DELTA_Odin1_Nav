@@ -1,0 +1,5 @@
+<library path="delta_pursuit_controller">
+  <class type="odin_nav_sim::DeltaPursuitController" base_class_type="nav2_core::Controller">
+    <description>Regulated Pure Pursuit with the Ranger Delta driving curvature limit.</description>
+  </class>
+</library>
