@@ -11,6 +11,7 @@
 #include "nav2_controller/plugins/simple_goal_checker.hpp"
 #include "nav2_core/exceptions.hpp"
 #include "nav2_regulated_pure_pursuit_controller/regulated_pure_pursuit_controller.hpp"
+#include "pluginlib/class_loader.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "terminal_clearance.hpp"
@@ -56,6 +57,16 @@ public:
     auto node = parent.lock();
     rcl_interfaces::msg::ParameterDescriptor descriptor;
     descriptor.read_only = true;
+    const auto tracking_parameter = name + ".tracking_controller";
+    if (!node->has_parameter(tracking_parameter)) {
+      node->declare_parameter(tracking_parameter, std::string{}, descriptor);
+    }
+    const auto tracking_plugin = node->get_parameter(tracking_parameter).as_string();
+    if (!tracking_plugin.empty()) {
+      tracking_controller_ = controller_loader_.createUniqueInstance(tracking_plugin);
+      tracking_controller_->configure(parent, name + ".tracking", tf, costmap_ros);
+      RCLCPP_INFO(logger_, "Using %s for path tracking", tracking_plugin.c_str());
+    }
     const auto parameter = name + ".minimum_turn_radius";
     if (!node->has_parameter(parameter)) {
       node->declare_parameter(parameter, 0.5, descriptor);
@@ -94,9 +105,37 @@ public:
 
   void cleanup() override
   {
+    if (tracking_controller_) {
+      tracking_controller_->cleanup();
+      tracking_controller_.reset();
+    }
     cloud_sub_.reset();
     std::atomic_store(&cloud_, Cloud::ConstSharedPtr{});
     RegulatedPurePursuitController::cleanup();
+  }
+
+  void activate() override
+  {
+    RegulatedPurePursuitController::activate();
+    if (tracking_controller_) {
+      tracking_controller_->activate();
+    }
+  }
+
+  void deactivate() override
+  {
+    if (tracking_controller_) {
+      tracking_controller_->deactivate();
+    }
+    RegulatedPurePursuitController::deactivate();
+  }
+
+  void setSpeedLimit(const double & speed_limit, const bool & percentage) override
+  {
+    RegulatedPurePursuitController::setSpeedLimit(speed_limit, percentage);
+    if (tracking_controller_) {
+      tracking_controller_->setSpeedLimit(speed_limit, percentage);
+    }
   }
 
   void setPlan(const nav_msgs::msg::Path & path) override
@@ -123,6 +162,9 @@ public:
     }
     endpoint_ = endpoint;
     RegulatedPurePursuitController::setPlan(path);
+    if (tracking_controller_) {
+      tracking_controller_->setPlan(path);
+    }
     phase_ = Phase::Tracking;
   }
 
@@ -215,6 +257,28 @@ public:
       }
     } else if (phase_ == Phase::AlignPath) {
       rotateToHeading(linear, angular, path_heading, speed);
+    } else if (tracking_controller_ && parking_command == Command::FollowPath) {
+      const auto tracking = tracking_controller_->computeVelocityCommands(pose, speed, goal_checker);
+      if (!std::isfinite(tracking.twist.linear.x) || !std::isfinite(tracking.twist.angular.z)) {
+        throw nav2_core::PlannerException("Tracking controller returned a non-finite velocity");
+      }
+      double speed_limit = std::abs(desired_linear_vel_);
+      if (max_approach_linear_speed_ > 0.0 && approachVelocityScalingFactor(path) < 1.0) {
+        speed_limit = std::min(speed_limit, max_approach_linear_speed_);
+      }
+      // Enforce chassis limits after the optimizer smooths the control sequence.
+      linear = std::max(0.0, tracking.twist.linear.x);
+      const double max_yaw_rate = linear * curvature_limit;
+      angular = std::clamp(tracking.twist.angular.z, -max_yaw_rate, max_yaw_rate);
+      if (linear > speed_limit) {
+        angular *= speed_limit / linear;
+        linear = speed_limit;
+      }
+      // Below the drive deadband the chassis would interpret yaw as a spin request.
+      if (linear < 0.001) {
+        linear = 0.0;
+        angular = 0.0;
+      }
     } else {
       const double curvature = distance > 0.0 ? 2.0 * point.y / (distance * distance) : 0.0;
       double direction = allow_reversing_ && point.x < 0.0 ? -1.0 : 1.0;
@@ -228,13 +292,15 @@ public:
         linear = std::clamp(linear, -kAxialSpeed, kAxialSpeed);
       }
       angular = linear * std::clamp(curvature, -curvature_limit, curvature_limit);
-      if (max_tracking_angular_speed_ > 0.0 && std::abs(angular) > max_tracking_angular_speed_) {
-        // Preserve the turning radius when limiting speed, including in the collision check.
-        linear *= max_tracking_angular_speed_ / std::abs(angular);
-        angular = std::copysign(max_tracking_angular_speed_, angular);
-      }
     }
 
+    if (linear != 0.0 && max_tracking_angular_speed_ > 0.0 &&
+      std::abs(angular) > max_tracking_angular_speed_)
+    {
+      // Preserve the turning radius when limiting speed, including in the collision check.
+      linear *= max_tracking_angular_speed_ / std::abs(angular);
+      angular = std::copysign(max_tracking_angular_speed_, angular);
+    }
     if (use_collision_detection_) {
       checkTrajectory(pose, distance, linear, angular);
     }
@@ -461,6 +527,8 @@ private:
   }
 
   double minimum_turn_radius_{0.5};
+  pluginlib::ClassLoader<nav2_core::Controller> controller_loader_{"nav2_core", "nav2_core::Controller"};
+  pluginlib::UniquePtr<nav2_core::Controller> tracking_controller_;
   double max_tracking_angular_speed_{0.0};
   double max_approach_linear_speed_{0.0};
   Phase phase_{Phase::Tracking};

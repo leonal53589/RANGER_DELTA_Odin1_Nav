@@ -9,21 +9,25 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>angles</depend>
+  <depend>behaviortree_cpp_v3</depend>
+  <depend>geometry_msgs</depend>
   <depend>nav2_controller</depend>
   <depend>nav2_costmap_2d</depend>
   <depend>nav2_regulated_pure_pursuit_controller</depend>
+  <depend>nav2_util</depend>
+  <depend>nav_msgs</depend>
   <depend>pluginlib</depend>
   <depend>sensor_msgs</depend>
+  <depend>tf2_geometry_msgs</depend>
   <exec_depend>agx_bringup</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_bt_navigator</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_mppi_controller</exec_depend>
   <exec_depend>nav2_common</exec_depend>
   <exec_depend>nav2_rviz_plugins</exec_depend>
   <exec_depend>nav2_smac_planner</exec_depend>

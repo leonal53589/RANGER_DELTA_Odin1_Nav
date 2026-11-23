@@ -151,6 +151,8 @@ RViz2 启动后，等 `Navigation` 显示 `active`。用 `Nav2 Goal` 在隔墙�
 
 ### 终端 1 启动导航
 
+2026-11-24 重新固定 ODIN1。当前 `base_link → lidar` 平移为 `(0.210, 0, 1.125) m`，三个安装角均为 `0 rad`。项目 `base_link` 原点在地面平面，`sensor_z` 直接使用量得的离地高度。换位后先停车复核旧图重定位和实时点云对齐。
+
 底盘和 ODIN1 上电，先关闭之前单独启动的 ODIN1、底盘反馈和导航节点。用 `ip -details link show can0` 检查 CAN 接口，未启用时运行 `sudo ip link set dev can0 up type can bitrate 500000`。
 
 实车重定位需要同次采集的本地 `map.bin`。换电脑时把它复制到地图目录，并把 `odin_relocalization.yaml` 里的 `relocalization_map_abs_path` 更新为本机绝对路径。参考点云 `1.pcd` 只在启用复核时需要。
@@ -165,7 +167,8 @@ MAP_DIR="$PWD/maps/odin_20261121_190632_Al1jxA"
 ros2 launch odin_nav_sim real_navigation.launch.py \
   map:="$MAP_DIR/site_nav.yaml" \
   odin_relocalization_config:="$MAP_DIR/odin_relocalization.yaml" \
-  sensor_x:=0.195 sensor_y:=0.0 sensor_z:=0.823 \
+  sensor_x:=0.210 sensor_y:=0.0 sensor_z:=1.125 \
+  sensor_roll:=0.0 sensor_pitch:=0.0 sensor_yaw:=0.0 \
   can_interface:=can0 enable_control:=false launch_rviz:=true
 ```
 
@@ -187,6 +190,10 @@ ros2 lifecycle get /controller_server
 
 默认 `goal_profile:=navigation` 用于通行，路径末端容差为 10 cm、0.20 rad。需要停车对齐时可用 `goal_profile:=precision`，路径末端容差为 6 cm、0.10 rad，规划搜索容差为 3.5 cm。验收时同时记录 RViz 原目标和栅格路径末点。网格中心量化与规划容差都会影响末点位置。
 
+实车行驶段由 Nav2 MPPI 生成速度指令，使用 Ackermann 模型、0.50 m 最小转弯半径和 2.8 秒预测。在 `nav2_real.yaml` 的 `FollowPath.tracking` 下调整 MPPI 参数。启动日志会打印 `Using nav2_mppi_controller::MPPIController for path tracking`。原地对正、末端停车和补位仍由底盘适配控制器处理。
+
+实车 **Start Nav Through Poses** 会先预规划整条路线，在中间途经点附近识别接近折返的路径连接。去程与回程夹角达到 135° 时，当前段在该点结束，车停稳并对准出段方向后继续。当前段的终点由停车检查器确认，普通途经点仍可连续通过。出现 `Stopping at waypoint ... to align with the next segment` 表示识别到折返。
+
 末端对准期间保持终点朝向，航向进入容差后输出零速。位置和航向用同一时刻的 TF 复核，轮式反馈低于停车阈值并持续满足条件 0.3 秒才报到点。停稳后位置持续超限才以最高 5 cm/s 补位，末端最多尝试两次修正。控制器日志记录补位和停稳验收。正常导航默认启用此流程，`goal_time_ab:=true` 仍使用两套原实验检查器。
 
 补位时，若航向达标且沿车身轴线移动可进入内圈，控制器优先短距离直进或倒车。整段扫掠区域需通过局部代价地图和 0.35 秒内的原始点云检查。起步前覆盖不足时沿路径补位，直移途中失去净空依据时停车。当前单台前向 ODIN1 的原始点云无法直接确认车尾净空，车尾覆盖不足时会沿路径补位。
@@ -196,7 +203,7 @@ ros2 lifecycle get /controller_server
 ### 常见中断
 
 - **缺少 `map` 或出现 TF 外推。** 分别查 `odom → base_link` 和 `map → odom`。ODIN1 的 `relocalization success` 后还要看到定位桥的 `Publishing map -> odom`。TF 恢复连续更新后再发新目标。静态 `map → odom` 入口只供停车联调。
-- **无路径或拐弯贴近障碍。** 在 RViz 检查全局代价地图的目标和沿途通道，必要时分段点通道中央。可在控制器激活后、发目标前用 `ros2 param set /controller_server FollowPath.lookahead_dist 0.22` 和 `ros2 param set /controller_server FollowPath.desired_linear_vel 0.04` 临时复查短前视、低速的效果。
+- **无路径或拐弯贴近障碍。** 在 RViz 检查全局代价地图的目标和沿途通道，必要时分段点通道中央。要复查低速跟踪，可调低 `FollowPath.tracking.vx_max` 后重启，再对照 `/plan`、`/cmd_vel_nav` 和 **Collision Check Arc**。
 - **膨胀区与禁行区。** 全局、局部软膨胀半径为 `0.55 / 0.50 m`。按现场测得最大外伸不超过 **28 cm**，两张代价地图统一使用 `robot_radius: 0.30`、`footprint_padding: 0.0`。Humble 静态地图复跑中，约 `(1.89, 0.00) m` 与 `(1.88, -0.02) m` 的两个旧禁行起点从代价 **253** 降至 **186**，均能生成路径。实车通行仍待复测，局部弧线碰撞需结合当时的实时点云复核。
 - **`Failed to make progress`。** 当前 12 秒内需平移超过 0.08 m 或转动超过 0.12 rad。对照 `/cmd_vel_nav`、`/cmd_vel`、`/odom` 和 `/motion_mode_feedback`，核对控制器请求、限速后指令、底盘反馈和切换状态。 [Nav2 配置](../src/odin_nav_sim/config/nav2_real.yaml)
 

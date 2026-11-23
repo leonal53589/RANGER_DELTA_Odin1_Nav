@@ -77,8 +77,10 @@ class OdometryEstimate:
     def update(self, timestamp, velocity, feedback_timeout):
         if self.timestamp is not None:
             dt = timestamp - self.timestamp
+            # 如果 CAN 总线短暂停滞、拔线或丢帧，导致两帧时间差 dt>0.2 秒，代码不会用这漫长的 dt 去乘当前速度，而是直接跳过位移累加，仅把 self.timestamp 重置为当前时间
             if 0 < dt <= feedback_timeout:
                 vx, vy, wz = self.velocity
+                # 中值航向角：积分这一小步位移时，使用的航向不是起点朝向，而是中间朝向 yaw + wz * dt / 2.0（Runge-Kutta 2 阶近似），显著降低圆弧行驶时的累计截断误差
                 heading = self.yaw + wz * dt / 2.0
                 self.x += (vx * math.cos(heading) - vy * math.sin(heading)) * dt
                 self.y += (vx * math.sin(heading) + vy * math.cos(heading)) * dt

@@ -164,11 +164,17 @@ class RangerDeltaFeedback(Node):
             self.update_odometry(timestamp, feedback)
 
     def update_odometry(self, timestamp, motion):
+        """
+        self.mode_timestamp is None：尚未收到 0x291，拒绝更新。
+        0 <= timestamp - self.mode_timestamp：防止运动反馈早于模式反馈。
+        timestamp - self.mode_timestamp <= feedback_timeout：模式反馈必须在当前运动反馈前 0.2 秒内
+        """
         if self.mode_timestamp is None or not 0 <= timestamp - self.mode_timestamp <= self.feedback_timeout:
             self.estimate.timestamp = None
             return
         mode, switching = self.mode_feedback
         body_twist = body_velocity(mode, motion, self.wheelbase, self.track)
+        # switching == 1 (底盘正处于模态切换过程中)时会立即暂停里程计更新
         if switching or body_twist is None:
             self.estimate.timestamp = None
             return

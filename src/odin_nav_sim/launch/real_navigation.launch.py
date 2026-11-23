@@ -80,6 +80,8 @@ def launch_setup(context):
             trace_goal_tf_time=True,
         )
         controller['goal_checker']['plugin'] = 'nav2_controller::SimpleGoalChecker'
+        controller['FollowPath'].pop('tracking_controller', None)
+        controller['FollowPath'].pop('tracking', None)
         controller['goal_checker_aligned'] = controller['goal_checker'].copy()
         controller['goal_checker_aligned'].update(xy_goal_tolerance=0.06, yaw_goal_tolerance=0.10)
         with NamedTemporaryFile(mode='w', suffix='.yaml', encoding='utf-8', delete=False) as output:

@@ -9,7 +9,9 @@ bt_navigator:
     enable_groot_monitoring: false
     # Keep a valid path until the goal changes or the costmap blocks the path.
     default_nav_to_pose_bt_xml: $(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_w_replanning_only_if_path_becomes_invalid.xml
+    default_nav_through_poses_bt_xml: $(find-pkg-share odin_nav_sim)/behavior_trees/navigate_waypoint_segments.xml
     plugin_lib_names:
+      - waypoint_segments_bt_node
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
       - nav2_follow_path_action_bt_node
@@ -53,6 +55,36 @@ controller_server:
       stateful: false
     FollowPath:
       plugin: odin_nav_sim::DeltaPursuitController
+      tracking_controller: nav2_mppi_controller::MPPIController
+      tracking:
+        motion_model: Ackermann
+        AckermannConstraints:
+          min_turning_r: 0.50
+        model_dt: 0.05
+        time_steps: 56
+        batch_size: 1000
+        iteration_count: 1
+        vx_max: 0.30
+        vx_min: 0.0
+        wz_max: 0.30
+        vx_std: 0.12
+        wz_std: 0.24
+        prune_distance: 1.5
+        visualize: false
+        # Final yaw is handled by the chassis' spin mode during terminal parking.
+        critics: [ConstraintCritic, CostCritic, GoalCritic, PathAlignCritic, PathFollowCritic, PathAngleCritic]
+        CostCritic:
+          # The local costmap represents the chassis with robot_radius and inflation.
+          consider_footprint: false
+        GoalCritic:
+          cost_weight: 8.0
+          threshold_to_consider: 0.85
+        PathAlignCritic:
+          cost_weight: 8.0
+          offset_from_furthest: 12
+          threshold_to_consider: 0.35
+        PathFollowCritic:
+          threshold_to_consider: 0.85
       # Keep the controller's curvature limit in sync with ranger_delta_command.
       minimum_turn_radius: 0.50
       desired_linear_vel: 0.30

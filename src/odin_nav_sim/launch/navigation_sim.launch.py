@@ -38,6 +38,8 @@ def prepare_nav2_params(context):
         plugin='odin_nav_sim::DeltaPursuitController', desired_linear_vel=0.04,
         minimum_turn_radius=0.50, min_approach_linear_velocity=0.03,
     )
+    controller['FollowPath'].pop('tracking_controller', None)
+    controller['FollowPath'].pop('tracking', None)
     navigator = configuration['bt_navigator']['ros__parameters']
     navigator['default_nav_to_pose_bt_xml'] = str(
         Path(get_package_share_directory('nav2_bt_navigator')) /
