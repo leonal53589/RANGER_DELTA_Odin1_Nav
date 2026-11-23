@@ -2,4 +2,7 @@
   <class type="odin_nav_sim::DeltaPursuitController" base_class_type="nav2_core::Controller">
     <description>Regulated Pure Pursuit with the Ranger Delta driving curvature limit.</description>
   </class>
+  <class type="odin_nav_sim::SettledGoalChecker" base_class_type="nav2_core::GoalChecker">
+    <description>Accepts the synchronized parking result from DeltaPursuitController.</description>
+  </class>
 </library>

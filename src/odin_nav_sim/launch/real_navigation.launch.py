@@ -79,6 +79,7 @@ def launch_setup(context):
             aligned_goal_checker_id='goal_checker_aligned',
             trace_goal_tf_time=True,
         )
+        controller['goal_checker']['plugin'] = 'nav2_controller::SimpleGoalChecker'
         controller['goal_checker_aligned'] = controller['goal_checker'].copy()
         controller['goal_checker_aligned'].update(xy_goal_tolerance=0.06, yaw_goal_tolerance=0.10)
         with NamedTemporaryFile(mode='w', suffix='.yaml', encoding='utf-8', delete=False) as output:
@@ -102,7 +103,7 @@ def launch_setup(context):
             },
             convert_types=True,
         )
-    rviz_config = PathJoinSubstitution([pkg_nav, 'rviz', 'navigation_sim.rviz'])
+    rviz_config = PathJoinSubstitution([pkg_nav, 'rviz', 'real_navigation.rviz'])
 
     nodes = [
         # 1. 底盘反馈节点 (SocketCAN 接收，发布 /odom 与 odom -> base_link TF)
