@@ -28,6 +28,7 @@ def launch_setup(context):
     publish_map_odom_tf = LaunchConfiguration('publish_map_odom_tf').perform(context) == 'true'
     map_yaml_file = LaunchConfiguration('map').perform(context)
     odin_relocalization_config = LaunchConfiguration('odin_relocalization_config').perform(context)
+    tf_stamp_lead = 0.30 if odin_relocalization_config else 0.0
     odin_reference_pcd = LaunchConfiguration('odin_reference_pcd').perform(context)
     odin_spin_guard = LaunchConfiguration('odin_spin_guard')
     goal_time_ab = LaunchConfiguration('goal_time_ab').perform(context) == 'true'
@@ -119,7 +120,16 @@ def launch_setup(context):
             }.items(),
         ),
 
-        # 2. 底盘速度驱动节点 (订阅 Nav2 规划出的 /cmd_vel，下发 CAN 0x111 帧)
+        Node(
+            package='odin_nav_sim', executable='navigation_velocity_guard',
+            name='navigation_velocity_guard', output='screen',
+            parameters=[nav2_params, {
+                'map_stamp_lead': tf_stamp_lead,
+                'allow_static_map': publish_map_odom_tf and not enable_control,
+            }],
+        ),
+
+        # 实车底盘仅消费经过近障与数据时效检查的速度。
         Node(
             package='ranger_delta_bringup',
             executable='ranger_delta_command',
@@ -130,6 +140,7 @@ def launch_setup(context):
                 nav2_params,
                 {
                     'enable_control': enable_control,
+                    'cmd_vel_topic': '/cmd_vel_guarded',
                     'can_interface': can_interface,
                 }
             ],
@@ -191,6 +202,7 @@ def launch_setup(context):
                     for name in ('odin_map_x', 'odin_map_y', 'odin_map_yaw')
                 },
                 {
+                    'tf_stamp_lead': tf_stamp_lead,
                     'odin_reference_pcd': ParameterValue(odin_reference_pcd, value_type=str),
                     'odin_spin_guard': ParameterValue(odin_spin_guard, value_type=bool),
                 },

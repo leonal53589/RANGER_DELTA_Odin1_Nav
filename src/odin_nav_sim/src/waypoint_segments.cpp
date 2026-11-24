@@ -28,6 +28,7 @@ public:
       BT::BidirectionalPort<Waypoints>("goals"),
       BT::InputPort<nav_msgs::msg::Path>("preview"),
       BT::BidirectionalPort<Waypoints>("segment"),
+      BT::OutputPort<geometry_msgs::msg::PoseStamped>("segment_goal"),
       BT::InputPort<double>("turn_angle", 3.0 * M_PI / 4.0, "Minimum turn angle in radians"),
       BT::InputPort<double>("match_distance", 0.20, "Waypoint match tolerance in metres"),
     };
@@ -139,6 +140,7 @@ private:
     }
     segment_size_ = segment.size();
     setOutput("segment", segment);
+    setOutput("segment_goal", segment.back());
     return true;
   }
 

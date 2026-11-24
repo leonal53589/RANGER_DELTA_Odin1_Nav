@@ -1,10 +1,28 @@
 # ODIN1 建图与导航进度
 
-## 当前阶段（2026-11-23）
+## 当前阶段（2026-11-24）
 
 - 新场地地图已通过短程实车导航和重复绕障。控制器按 Ranger Delta 的 0.50 m 最小行驶转弯半径跟踪路径，普通导航使用 10 cm 到点容差。按[实车启动步骤](#终端-1-启动导航)完成停车验收后，再开启底盘控制。
 - 同一次定位会话的实车 A/B 中，时间对齐版从 **10.79 s 缩短到 7.19 s** 报到，停稳用时从 **11.50 s 缩短到 7.47 s**。这版仍在实验入口验证。最新对齐轮尺量距 B **2.94 cm**，后续优先核对实体目标到地图的换算以及跨会话定位偏差。
 - 本地录包和调试日志已移出工作区，以下旧日志链接可在恢复 `log/` 后查看。普通实车导航依赖新场地的 `site_nav.yaml`、`site_nav.pgm` 和同次采集的本地 `map.bin`。
+
+### 本轮导航可靠性改动
+
+1. **先看能否停车。** 实车速度链为 `/cmd_vel_nav → /cmd_vel → /cmd_vel_guarded → 底盘 CAN`。末级按 40 Hz 检查原始点云、轮速、地图定位和速度指令。车周围已观测到的近障以及输入超时会触发零速。定位检查扣除定位桥的 TF 前置时间。状态变化发布到 `/navigation_velocity_guard/state`。
+2. **再看能否恢复任务。** 单点与途经点的行驶段共用等待和绕行逻辑。局部及全局点云层从雷达原点开始清除新射线经过的动态栅格。固定地图仍由静态层提供。可复现的近障对照中，原 20 cm 清除起距在移走障碍后仍留下一个致命栅格，改为 0 后同场景恢复通行。
+3. **最后验收实体精度。** 固定同一实体 B 和地图目标，直行、左转后接近、右转后接近各做 5 轮。每轮记动作结果、原目标、控制器接受的路径末点（`/controller_server/tracking_endpoint`）、停稳时刻的地图 TF、R/F 到两条基准线的四个读数。用两标记中点相对示教中点的距离衡量实体误差，同时记录两标记连线的角度变化。按组统计成功次数、中位和最大误差，并注明卷尺单读数约 ±0.5 cm。物理停车距离、盲区与上述精度数据待本版实车复验。
+
+最终版隔离仿真中，模拟断流后 **0.249 s** 输出零速，恢复后到达单点。途经导航中注入近障后 **0.050 s** 输出零速，移开后走完两站。地图外目标连续无路 **20.0 s** 后返回失败，期间输出保持零速。另一次远障注入触发同向换路并报到，该轮模拟里程计在报到时距原目标约 **15 cm**，需要结合实际跟踪末点拆解误差。这些时延测到软件速度输出，实车制动距离另测。
+
+**隔离仿真复验**（在项目根目录运行）
+
+```bash
+source install/setup.bash
+ROS_DOMAIN_ID=87 ROS_LOCALHOST_ONLY=1 PYTHONNOUSERSITE=1 \
+  launch_test src/odin_nav_sim/test/obstacle_scenarios.launch.py
+```
+
+实车先用下方停车验收入口启动。对照平滑速度、受保护速度、轮速与保护原因。低速制动测试使用软障碍物，分别记录首次有效近点、保护输出零速和轮速持续归零的时刻。以最差实测反应时间及减速度核对配置。ODIN1 安装高度 1.125 m，低箱子、贴身盲区和车后方的覆盖需要现场单独测量。CAN 断线时需要核对底盘自身的失联停车行为。
 
 ## 已实测
 
@@ -182,6 +200,8 @@ export ROS_DOMAIN_ID=44 ROS_LOCALHOST_ONLY=1 PYTHONNOUSERSITE=1
 timeout 5s ros2 topic echo /system_status --once
 timeout 10s ros2 run tf2_ros tf2_echo map base_link
 ros2 lifecycle get /controller_server
+ros2 topic echo /navigation_velocity_guard/state --qos-durability transient_local --once
+ros2 topic info /cmd_vel_guarded --verbose
 ```
 
 把车停在新图采图起点附近，朝向尽量与采图时一致。确认底盘状态正常、TF 持续更新、控制器为 `active`。实车 RViz 默认叠加静态地图、全局和局部代价地图以及全局路径。可单独勾选两张代价地图，观察障碍出现或消失后路径是否变化。需要核对墙线和地图对齐时，在 `map` 固定坐标系下添加 `/odin1/cloud_raw`，并检查地图坐标约 `(1.12, -1.70) m` 的小块静态占用。
@@ -205,6 +225,7 @@ ros2 lifecycle get /controller_server
 - **缺少 `map` 或出现 TF 外推。** 分别查 `odom → base_link` 和 `map → odom`。ODIN1 的 `relocalization success` 后还要看到定位桥的 `Publishing map -> odom`。TF 恢复连续更新后再发新目标。静态 `map → odom` 入口只供停车联调。
 - **无路径或拐弯贴近障碍。** 在 RViz 检查全局代价地图的目标和沿途通道，必要时分段点通道中央。要复查低速跟踪，可调低 `FollowPath.tracking.vx_max` 后重启，再对照 `/plan`、`/cmd_vel_nav` 和 **Collision Check Arc**。
 - **膨胀区与禁行区。** 全局、局部软膨胀半径为 `0.55 / 0.50 m`。按现场测得最大外伸不超过 **28 cm**，两张代价地图统一使用 `robot_radius: 0.30`、`footprint_padding: 0.0`。Humble 静态地图复跑中，约 `(1.89, 0.00) m` 与 `(1.88, -0.02) m` 的两个旧禁行起点从代价 **253** 降至 **186**，均能生成路径。实车通行仍待复测，局部弧线碰撞需结合当时的实时点云复核。
+- **单点和途经点遇阻。** 近段受阻或跟踪失败先让行 2 秒。只有远段失效时，若当前前方 0.60 m 路径仍然有效，可在 0.25 秒内换上方向接近且通过代价检查的新路径。其余情况停车重规划。连续受阻的基础期限为 20 秒，沿有效替代路线实际转向收敛时可获得有限额外时间（最多约 10.5 秒）。轮式里程计沿出发方向推进 12 cm 且跟踪持续至少 0.8 秒后才重置受阻计时。
 - **`Failed to make progress`。** 当前 12 秒内需平移超过 0.08 m 或转动超过 0.12 rad。对照 `/cmd_vel_nav`、`/cmd_vel`、`/odom` 和 `/motion_mode_feedback`，核对控制器请求、限速后指令、底盘反馈和切换状态。 [Nav2 配置](../src/odin_nav_sim/config/nav2_real.yaml)
 
 ## 自旋定位处理实车 A/B（2026-11-21）

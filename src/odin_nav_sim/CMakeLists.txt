@@ -25,11 +25,20 @@ target_compile_features(waypoint_segments_bt_node PUBLIC cxx_std_17)
 target_compile_definitions(waypoint_segments_bt_node PRIVATE BT_PLUGIN_EXPORT)
 ament_target_dependencies(waypoint_segments_bt_node
   behaviortree_cpp_v3 geometry_msgs nav2_util nav_msgs tf2_geometry_msgs)
-install(TARGETS delta_pursuit_controller waypoint_segments_bt_node LIBRARY DESTINATION lib)
+add_library(obstacle_navigation_bt_node SHARED src/obstacle_navigation.cpp)
+target_compile_features(obstacle_navigation_bt_node PUBLIC cxx_std_17)
+target_compile_definitions(obstacle_navigation_bt_node PRIVATE BT_PLUGIN_EXPORT)
+ament_target_dependencies(obstacle_navigation_bt_node
+  behaviortree_cpp_v3 geometry_msgs nav2_util nav_msgs tf2_geometry_msgs)
+
+install(TARGETS delta_pursuit_controller waypoint_segments_bt_node obstacle_navigation_bt_node LIBRARY DESTINATION lib)
 
 install(PROGRAMS scripts/simulated_base.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME simulated_base)
+install(PROGRAMS scripts/navigation_velocity_guard.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME navigation_velocity_guard)
 install(PROGRAMS scripts/odin_localization.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME odin_localization)
@@ -46,6 +55,8 @@ if(BUILD_TESTING)
   ament_add_gtest(waypoint_turn test/test_waypoint_turn.cpp)
   target_compile_features(waypoint_turn PUBLIC cxx_std_17)
   ament_target_dependencies(waypoint_turn geometry_msgs nav_msgs)
+  ament_add_pytest_test(navigation_velocity_guard test/test_navigation_velocity_guard.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
   ament_add_pytest_test(odin_localization test/test_odin_localization.py
     APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/scripts)
 endif()

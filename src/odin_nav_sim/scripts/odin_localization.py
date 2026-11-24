@@ -42,6 +42,9 @@ class OdinLocalization(Node):
         x = self.declare_parameter('odin_map_x', 0.0).value
         y = self.declare_parameter('odin_map_y', 0.0).value
         yaw = self.declare_parameter('odin_map_yaw', 0.0).value
+        self.tf_stamp_lead = self.declare_parameter('tf_stamp_lead', 0.30).value
+        if not math.isfinite(self.tf_stamp_lead) or self.tf_stamp_lead < 0:
+            raise ValueError('tf_stamp_lead must be finite and nonnegative')
         self.max_pose_age = self.declare_parameter('max_pose_age', 0.5).value
         if not all(math.isfinite(n) for n in (x, y, yaw, self.max_pose_age)) or self.max_pose_age <= 0:
             raise ValueError('Map alignment must be finite and max_pose_age must be positive')
@@ -174,7 +177,7 @@ class OdinLocalization(Node):
         transform = TransformStamped()
         transform.header.frame_id = 'map'
         # Let Nav2 use newer wheel poses with this correction, until it expires.
-        transform.header.stamp = (stamp + Duration(seconds=0.30)).to_msg()
+        transform.header.stamp = (stamp + Duration(seconds=self.tf_stamp_lead)).to_msg()
         transform.child_frame_id = 'odom'
         transform.transform.translation.x = alignment.p.x()
         transform.transform.translation.y = alignment.p.y()

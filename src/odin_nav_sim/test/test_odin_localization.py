@@ -34,7 +34,7 @@ def test_newer_wheel_pose_can_use_recent_map_correction():
     clock = Mock()
     node = SimpleNamespace(
         odin_tf=odin_tf, robot_tf=robot_tf, map_from_odin_map=PyKDL.Frame(),
-        map_check=None, spin_guard=None, max_pose_age=0.5, last_stamp=None, get_clock=lambda: clock,
+        map_check=None, spin_guard=None, max_pose_age=0.5, tf_stamp_lead=0.30, last_stamp=None, get_clock=lambda: clock,
         get_logger=Mock(), broadcaster=Mock(),
     )
 

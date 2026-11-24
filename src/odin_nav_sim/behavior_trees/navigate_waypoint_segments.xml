@@ -1,39 +1,24 @@
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <WaypointSegments goals="{goals}" preview="{preview_path}" segment="{segment_goals}">
-      <RecoveryNode number_of_retries="1" name="PreviewWaypointRoute">
-        <ComputePathThroughPoses goals="{goals}" path="{preview_path}" planner_id="GridBased"/>
-        <ClearEntireCostmap service_name="global_costmap/clear_entirely_global_costmap"/>
-      </RecoveryNode>
-      <RecoveryNode number_of_retries="6" name="NavigateSegment">
-        <PipelineSequence name="NavigateWithReplanning">
-          <RateController hz="0.333">
-            <RecoveryNode number_of_retries="1" name="PlanActiveSegment">
-              <ReactiveSequence>
-                <RemovePassedGoals input_goals="{segment_goals}" output_goals="{segment_goals}" radius="0.7"/>
-                <ComputePathThroughPoses goals="{segment_goals}" path="{path}" planner_id="GridBased"/>
-              </ReactiveSequence>
-              <ClearEntireCostmap service_name="global_costmap/clear_entirely_global_costmap"/>
-            </RecoveryNode>
-          </RateController>
-          <RecoveryNode number_of_retries="1" name="TrackActiveSegment">
-            <FollowPath path="{path}" controller_id="FollowPath"/>
-            <ClearEntireCostmap service_name="local_costmap/clear_entirely_local_costmap"/>
-          </RecoveryNode>
-        </PipelineSequence>
-        <ReactiveFallback name="RecoverSegment">
-          <GoalUpdated/>
-          <RoundRobin>
-            <Sequence>
-              <ClearEntireCostmap service_name="local_costmap/clear_entirely_local_costmap"/>
-              <ClearEntireCostmap service_name="global_costmap/clear_entirely_global_costmap"/>
-            </Sequence>
-            <Spin spin_dist="1.57"/>
-            <Wait wait_duration="5"/>
-            <BackUp backup_dist="0.30" backup_speed="0.05"/>
-          </RoundRobin>
-        </ReactiveFallback>
-      </RecoveryNode>
+    <WaypointSegments goals="{goals}" preview="{preview_path}" segment="{segment_goals}"
+                      segment_goal="{segment_goal}">
+      <Timeout msec="21000">
+        <RecoveryNode number_of_retries="10" name="PreviewWaypointRoute">
+          <ComputePathThroughPoses goals="{goals}" path="{preview_path}" planner_id="GridBased"/>
+          <Wait wait_duration="2"/>
+        </RecoveryNode>
+      </Timeout>
+      <ReactiveSequence>
+        <RemovePassedGoals input_goals="{segment_goals}" output_goals="{segment_goals}" radius="0.7"/>
+        <ObstacleNavigation goal="{segment_goal}" candidate="{candidate}" path="{path}"
+                            goal_probe="{goal_probe}" prefix="{safe_prefix}">
+          <ComputePathThroughPoses goals="{segment_goals}" path="{candidate}" planner_id="GridBased"/>
+          <IsPathValid path="{path}"/>
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <IsPathValid path="{goal_probe}"/>
+          <IsPathValid path="{safe_prefix}"/>
+        </ObstacleNavigation>
+      </ReactiveSequence>
     </WaypointSegments>
   </BehaviorTree>
 </root>

@@ -55,6 +55,8 @@ public:
   {
     RegulatedPurePursuitController::configure(parent, name, tf, costmap_ros);
     auto node = parent.lock();
+    endpoint_pub_ = node->create_publisher<geometry_msgs::msg::PoseStamped>(
+      "~/tracking_endpoint", rclcpp::QoS(1).transient_local());
     rcl_interfaces::msg::ParameterDescriptor descriptor;
     descriptor.read_only = true;
     const auto tracking_parameter = name + ".tracking_controller";
@@ -109,6 +111,7 @@ public:
       tracking_controller_->cleanup();
       tracking_controller_.reset();
     }
+    endpoint_pub_.reset();
     cloud_sub_.reset();
     std::atomic_store(&cloud_, Cloud::ConstSharedPtr{});
     RegulatedPurePursuitController::cleanup();
@@ -117,6 +120,7 @@ public:
   void activate() override
   {
     RegulatedPurePursuitController::activate();
+    endpoint_pub_->on_activate();
     if (tracking_controller_) {
       tracking_controller_->activate();
     }
@@ -127,6 +131,7 @@ public:
     if (tracking_controller_) {
       tracking_controller_->deactivate();
     }
+    endpoint_pub_->on_deactivate();
     RegulatedPurePursuitController::deactivate();
   }
 
@@ -165,6 +170,7 @@ public:
     if (tracking_controller_) {
       tracking_controller_->setPlan(path);
     }
+    endpoint_pub_->publish(endpoint_);
     phase_ = Phase::Tracking;
   }
 
@@ -533,6 +539,7 @@ private:
   double max_approach_linear_speed_{0.0};
   Phase phase_{Phase::Tracking};
   geometry_msgs::msg::PoseStamped endpoint_;
+  rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PoseStamped>::SharedPtr endpoint_pub_;
   Clock::time_point last_compute_;
   int64_t last_pose_stamp_{0};
   TerminalParking parking_;
