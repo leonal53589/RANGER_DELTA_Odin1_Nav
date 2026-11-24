@@ -42,13 +42,22 @@ Visualization Manager:
         Durability Policy: Volatile
         Reliability Policy: Reliable
     - Class: rviz_default_plugins/Path
-      Name: Global Plan
+      Name: Last Controller Plan
       Enabled: true
       Color: 0; 170; 90
       Line Style: Billboards
       Line Width: 0.025
       Offset:
         Z: 0.03
+      Topic:
+        Value: /controller_server/accepted_plan
+        Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Path
+      Name: Planner Candidates
+      Enabled: false
+      Color: 220; 150; 35
+      Line Style: Billboards
+      Line Width: 0.015
       Topic:
         Value: /plan
     - Class: rviz_default_plugins/Path

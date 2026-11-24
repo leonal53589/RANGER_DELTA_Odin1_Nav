@@ -13,7 +13,9 @@ from launch import LaunchDescription
 from launch.actions import GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node, SetRemap
+from nav_msgs.msg import Path as NavPath
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
+from nav2_msgs.srv import GetCostmap
 from rclpy.action import ActionClient
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
@@ -49,10 +51,14 @@ class TestNavigation(unittest.TestCase):
         self.addCleanup(rclpy.shutdown)
         self.addCleanup(self.node.destroy_node)
         self.endpoints = []
+        self.accepted_plans = []
+        self.node.create_subscription(NavPath, '/controller_server/accepted_plan',
+                                      self.accepted_plans.append, 10)
         self.node.create_subscription(PoseStamped, '/controller_server/tracking_endpoint',
                                       self.endpoints.append, 10)
         self.cloud = self.node.create_publisher(PointCloud2, '/odin1/cloud_raw', qos_profile_sensor_data)
         self.returns = 'clear'
+        self.fixture_points = None
         self.velocities = []
         self.node.create_subscription(Twist, '/cmd_vel_guarded', self.receive_velocity, 10)
         self.node.create_timer(.08, self.scan)
@@ -64,7 +70,43 @@ class TestNavigation(unittest.TestCase):
         x = .16 if self.returns == 'blocked' else 3.1
         header = Header(frame_id='lidar', stamp=self.node.get_clock().now().to_msg())
         points = [[x, x*i/300., -.52] for i in range(-24, 25)]
-        self.cloud.publish(create_cloud_xyz32(header, points))
+        if self.returns == 'clear':
+            # Sample a patch of visible floor behind the removed near obstacle.
+            # A single line of rays can miss its voxel after grid discretization.
+            points.extend([cm / 100., cm / 100. * i / 20., -1.125]
+                          for cm in range(20, 61, 2) for i in range(-8, 9))
+        self.cloud.publish(create_cloud_xyz32(
+            header, self.fixture_points if self.fixture_points is not None else points))
+
+    def check_floor_clearing(self):
+        # Two returns on opposite sides of the path. The floor rays cross the lower
+        # return at its height, but pass well below the higher, now occluded edge.
+        self.fixture_points = [[1.061, .671, -.50], [1.061, -.671, .105]]
+        services = [self.node.create_client(GetCostmap, f'/{scope}/get_costmap')
+                    for scope in ('global_costmap', 'local_costmap')]
+
+        def matches(lower_occupied):
+            for client in services:
+                request = client.call_async(GetCostmap.Request())
+                self.until(request.done, 3)
+                grid = request.result().map
+                m = grid.metadata
+                x = int((1.271 - m.origin.position.x) / m.resolution)
+                def cost_at(y):
+                    row = int((y - m.origin.position.y) / m.resolution)
+                    return grid.data[row * m.size_x + x]
+
+                low = cost_at(.671)
+                if cost_at(-.671) != 254 or (low != 254 if lower_occupied else low >= 253):
+                    return False
+            return True
+
+        for client in services:
+            self.assertTrue(client.wait_for_service(timeout_sec=5))
+        self.until(lambda: matches(True), 5)
+        self.fixture_points = [[1.061 * 2.25, y * 2.25, -1.125] for y in (.671, -.671)]
+        self.until(lambda: matches(False), 5)
+        self.fixture_points = None
 
     def receive_velocity(self, msg):
         self.velocities.append((time.monotonic(), msg.linear.x, msg.angular.z))
@@ -127,6 +169,7 @@ class TestNavigation(unittest.TestCase):
                 break
         else:
             self.fail('navigation lifecycle did not activate')
+        self.check_floor_clearing()
         single = self.start(NavigateToPose, 'navigate_to_pose', [.90])
         self.interrupt(single, 'off', .50)
         multi = self.start(NavigateThroughPoses, 'navigate_through_poses', [1.30, 1.80])
@@ -134,6 +177,8 @@ class TestNavigation(unittest.TestCase):
         self.assertGreaterEqual(len(self.endpoints), 2)
         self.assertEqual(self.endpoints[-1].header.frame_id, 'map')
         self.assertLess(abs(self.endpoints[-1].pose.position.x - 1.80), .20)
+        self.assertTrue(self.accepted_plans)
+        self.assertEqual(self.accepted_plans[-1].poses[-1].pose, self.endpoints[-1].pose)
 
         # A permanently unreachable goal must return an action result without driving.
         single_client = ActionClient(self.node, NavigateToPose, 'navigate_to_pose')

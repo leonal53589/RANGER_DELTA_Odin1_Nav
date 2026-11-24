@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "behaviortree_cpp_v3/bt_factory.h"
 #include "behaviortree_cpp_v3/control_node.h"
@@ -40,6 +42,52 @@ double departure(const Path & path, const Pose & robot)
   }
   return std::atan2(ahead->pose.position.y - robot.pose.position.y,
     ahead->pose.position.x - robot.pose.position.x);
+}
+
+// Compare routes where the detour occurs, up to the global obstacle marking range.
+// Equal arc-length samples avoid mistaking different planner point densities for a new route.
+using RouteSamples = std::array<geometry_msgs::msg::Point, 14>;
+
+RouteSamples sampleRoute(const Path & path, const Pose & robot)
+{
+  RouteSamples samples;
+  auto it = nearestPoint(path, robot);
+  double walked = 0.0;
+  double target = 0.0;
+  for (auto & point : samples) {
+    target += 0.25;
+    while (it + 1 != path.poses.end()) {
+      const double step = separation(*it, *(it + 1));
+      if (step > 0 && walked + step >= target) {
+        break;
+      }
+      walked += step;
+      ++it;
+    }
+    point = it->pose.position;
+    if (it + 1 != path.poses.end()) {
+      const auto & next = (it + 1)->pose.position;
+      const double f = (target - walked) / separation(*it, *(it + 1));
+      point.x += f * (next.x - point.x);
+      point.y += f * (next.y - point.y);
+    }
+  }
+  return samples;
+}
+
+bool similarRoute(const Path & a, const Path & b, const Pose & robot, double tolerance)
+{
+  if (a.poses.empty() || b.poses.empty() || a.header.frame_id != b.header.frame_id) {
+    return false;
+  }
+  const auto first = sampleRoute(a, robot);
+  const auto second = sampleRoute(b, robot);
+  for (size_t i = 0; i < first.size(); ++i) {
+    if (std::hypot(first[i].x - second[i].x, first[i].y - second[i].y) > tolerance) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Only bridge a remote blockage on a verified near stretch. A sparse or
@@ -109,7 +157,10 @@ public:
     alignment_credit_ = 0.0;
     active_.poses.clear();
     previous_heading_.reset();
-    pending_heading_.reset();
+    pending_route_.poses.clear();
+    previous_route_.poses.clear();
+    tracking_failures_ = 0;
+    retry_after_ = {};
     anchor_.reset();
     next_check_ = {};
     last_failure_ = Failure::Planning;
@@ -136,40 +187,71 @@ private:
     } else {
       next_check_ = now + period;
     }
+    if (!active_.poses.empty()) {
+      previous_route_ = std::move(active_);
+      if (last_failure_ == Failure::Tracking) {
+        ++tracking_failures_;
+        if (tracking_failures_ >= 2) {
+          retry_after_ = now + std::chrono::seconds(3);
+          if (tracking_failures_ == 2) {
+            RCLCPP_WARN(node_->get_logger(),
+              "Controller repeatedly rejected this route without progress; spacing equivalent retries");
+          }
+        }
+      } else {
+        tracking_failures_ = 0;
+      }
+    }
     active_.poses.clear();
     anchor_.reset();
-    pending_heading_.reset();
+    pending_route_.poses.clear();
   }
 
-  void checkProgress(Clock::time_point now, double heading, const Pose & map_pose)
+  bool stalled(Clock::time_point now, double heading, const Pose & map_pose)
   {
     Pose odom;
     if (!nav2_util::getCurrentPose(odom, *tf_, "odom", "base_link", 0.0)) {
-      return;
+      return false;
     }
     if (!anchor_) {
       anchor_ = odom.pose.position;
       progress_heading_ = heading - tf2::getYaw(map_pose.pose.orientation) +
         tf2::getYaw(odom.pose.orientation);
+      // Near the endpoint the controller turns to the requested final orientation.
+      const auto & end = active_.poses.back();
+      const double align_heading = separation(map_pose, end) <= 0.15 ?
+        tf2::getYaw(end.pose.orientation) : heading;
+      alignment_heading_ = align_heading - tf2::getYaw(map_pose.pose.orientation) +
+        tf2::getYaw(odom.pose.orientation);
       initial_yaw_error_ = std::abs(std::remainder(
-        progress_heading_ - tf2::getYaw(odom.pose.orientation), 2.0 * M_PI));
+        alignment_heading_ - tf2::getYaw(odom.pose.orientation), 2.0 * M_PI));
       tracking_since_ = now;
     }
     // Count only a new best reduction towards this departure heading in wheel
     // coordinates. Oscillation and repeated short plans cannot accumulate credit.
     const double error = std::abs(std::remainder(
-      progress_heading_ - tf2::getYaw(odom.pose.orientation), 2.0 * M_PI));
+      alignment_heading_ - tf2::getYaw(odom.pose.orientation), 2.0 * M_PI));
     const double earned = std::min(initial_yaw_error_ - error,
       0.30 * std::chrono::duration<double>(now - tracking_since_).count());
     alignment_credit_ = std::max(alignment_credit_, earned / 0.30);
     const auto & p = odom.pose.position;
     const double advance = (p.x - anchor_->x) * std::cos(progress_heading_) +
       (p.y - anchor_->y) * std::sin(progress_heading_);
-    if (advance >= 0.12 && now - tracking_since_ >= std::chrono::milliseconds(800)) {
+    if (advance >= (blocked_ ? 0.12 : 0.08) &&
+      now - tracking_since_ >= std::chrono::milliseconds(800))
+    {
+      if (blocked_) {
+        RCLCPP_INFO(node_->get_logger(), "Route progress resumed on wheel odometry");
+      }
+      tracking_failures_ = 0;
+      retry_after_ = {};
+      alignment_credit_ = 0.0;
       blocked_.reset();
       anchor_.reset();
-      RCLCPP_INFO(node_->get_logger(), "Route progress resumed on wheel odometry");
+      return false;
     }
+    // A turn can earn at most pi / 0.30 s once. Rocking cannot keep extending the window.
+    return std::chrono::duration<double>(now - tracking_since_).count() >= 12.0 + alignment_credit_;
   }
 
   bool validatePath(const Path & path)
@@ -204,7 +286,8 @@ private:
         if (result == Status::SUCCESS && path && !path.value().poses.empty() &&
           path.value().header.frame_id == active_.header.frame_id &&
           std::abs(std::remainder(departure(path.value(), robot) - departure(active_, robot),
-          2.0 * M_PI)) <= M_PI / 6 && validatePath(path.value()) &&
+          2.0 * M_PI)) <= M_PI / 6 && similarRoute(active_, path.value(), robot, 0.40) &&
+          validatePath(path.value()) &&
           Clock::now() < *handover_deadline_)
         {
           haltChild(0);
@@ -244,11 +327,13 @@ private:
       const bool have_pose = nav2_util::getCurrentPose(robot, *tf_, active_.header.frame_id, "base_link", 0.0);
       if (have_pose) {
         previous_heading_ = departure(active_, robot);
-        if (blocked_) {
-          checkProgress(now, *previous_heading_, robot);
+        if (stalled(now, *previous_heading_, robot)) {
+          RCLCPP_WARN(node_->get_logger(), "No net wheel progress along the route; yielding");
+          last_failure_ = Failure::Tracking;
+          stopTracking(now);
         }
       }
-      if (!handover_deadline_ && now >= next_check_) {
+      if (!active_.poses.empty() && !handover_deadline_ && now >= next_check_) {
         const auto valid = children_nodes_[1]->executeTick();
         haltChild(1);
         next_check_ = now + period;
@@ -329,17 +414,29 @@ private:
       auto angle = [heading](double other) {
           return std::abs(std::remainder(heading - other, 2.0 * M_PI));
         };
-      // Require two successive plans before committing to a large change of direction.
+      const bool same_rejected_route = similarRoute(previous_route_, path, robot, 0.15);
+      if (now < retry_after_ && same_rejected_route) {
+        next_check_ = retry_after_;
+        pending_route_.poses.clear();
+        return Status::RUNNING;
+      }
+      // A shared initial tangent can lead to opposite sides of the obstruction.
       if ((angle(tf2::getYaw(robot.pose.orientation)) > M_PI / 3 ||
-        (previous_heading_ && angle(*previous_heading_) > M_PI / 3)) &&
-        (!pending_heading_ || angle(*pending_heading_) > M_PI / 6))
+        (previous_heading_ && angle(*previous_heading_) > M_PI / 3) ||
+        (!previous_route_.poses.empty() && !similarRoute(previous_route_, path, robot, 0.40))) &&
+        (!similarRoute(pending_route_, path, robot, 0.25) ||
+        angle(departure(pending_route_, robot)) > M_PI / 6))
       {
-        pending_heading_ = heading;
+        pending_route_ = path;
         next_check_ = now + period;
         return Status::RUNNING;
       }
+      if (!same_rejected_route) {
+        tracking_failures_ = 0;
+        retry_after_ = {};
+      }
     }
-    pending_heading_.reset();
+    pending_route_.poses.clear();
     last_failure_ = Failure::Tracking;
     active_ = path;
     setOutput("path", active_);
@@ -354,7 +451,11 @@ private:
   std::optional<Clock::time_point> blocked_, handover_deadline_, plan_started_;
   double initial_yaw_error_{0.0}, alignment_credit_{0.0};
   Clock::time_point next_check_{}, tracking_since_{};
-  std::optional<double> previous_heading_, pending_heading_;
+  std::optional<double> previous_heading_;
+  Path previous_route_, pending_route_;
+  unsigned int tracking_failures_{0};
+  Clock::time_point retry_after_{};
+  double alignment_heading_{0.0};
   std::optional<geometry_msgs::msg::Point> anchor_;
   double progress_heading_{0.0}, yield_{2.0}, timeout_{20.0};
   Failure last_failure_{Failure::Planning};
