@@ -1,164 +1,55 @@
-# Odin1 留形模组单机测试与轻量建图工作空间 (project_slam)
+# Ranger Delta + ODIN1 导航
 
-本项目从 `26-Sentry` 导航工程中严格迁移了留形模组（Odin1）的驱动与建图代码，并针对单机手持/桌面测试进行了优化适配。
+基于 Ubuntu 22.04、ROS 2 Humble 和 Nav2。ODIN1 通过 USB 发布点云和定位数据。Ranger Delta 通过 SocketCAN 接收运动指令并回传底盘状态。RViz 用于查看地图、代价地图和路径，以及发送单点或途经点目标。
 
----
+## 项目结构
 
-## 一、工作空间结构
+| 目录 | 职责 |
+|---|---|
+| `src/odin_ros_driver` | ODIN1 驱动，发布实时点云、SLAM 点云和设备位姿 |
+| `src/odin_slam` | 累加 SLAM 点云，保存时做裁剪、体素降采样和离群点剔除 |
+| `src/ranger_delta_bringup` | 底盘 CAN 收发、轮式里程计、车体 URDF 和雷达外参 |
+| `src/odin_nav_sim` | 实车与仿真启动、定位桥、Nav2 配置、行为树、底盘控制适配和速度保护 |
+| `src/odin_cloud_cleaner`、`src/vendor` | 可选的点云预处理，以及固定版本的松灵驱动和车体模型 |
+| `maps`、`scripts` | 场地地图、采图与导航入口 |
 
+## 数据流与算法
+
+```text
+ODIN1 重定位位姿 + 雷达外参 + 轮式里程计 → map → odom → base_link → lidar
+静态栅格 + 实时点云 → 代价地图 → SmacPlanner2D → 路径 → MPPI / 末端停车
+/cmd_vel_nav → 速度平滑 → /cmd_vel → 速度保护 → /cmd_vel_guarded → 底盘 CAN
 ```
-project_slam/
-├── src/
-│   ├── odin_ros_driver/       # 留形 Odin1 官方驱动（已适配哨兵工程低负载参数与 SensorDataQoS）
-│   ├── odin_slam/             # 点云累加 SLAM 节点与 Qt 控制界面（一键运行/暂停/保存 PCD）
-│   ├── odin_cloud_cleaner/    # 留形点云去噪与自车遮挡剔除预处理节点（备用）
-│   ├── odin_nav_sim/          # Nav2 导航仿真
-│   ├── ranger_delta_bringup/  # RANGER DELTA 底盘接口
-│   └── vendor/               # 松灵 ROS 2 驱动与原厂 Delta 模型
-├── maps/                      # 建图结果保存目录（自动生成 0.pcd, 1.pcd...）
-├── dependencies.repos         # 第三方源码的仓库地址与版本
-└── README.md
-```
 
----
+- **定位。** 设 $T^A_B$ 将 $B$ 系坐标变换到 $A$ 系。定位桥在共同采样时刻，用外参逆变换将 ODIN1 雷达位姿换算为车体位姿并投影到平面，再求 $T^{map}_{odom}=T^{map}_{base}(T^{odom}_{base})^{-1}$。底盘反馈节点积分轮速和转向反馈，发布 `odom → base_link`。 [定位桥](src/odin_nav_sim/scripts/odin_localization.py)
+- **规划与跟踪。** 全局代价地图叠加静态栅格与实时障碍，局部代价地图在 `odom` 下随车滚动。点云回波标记障碍，射线清除经过的动态栅格。SmacPlanner2D 在全局代价地图搜索，MPPI 用 Ackermann 模型采样控制序列，按路径、目标和障碍代价对样本加权。行驶时满足 $|\omega|\leq |v|/R_{\min}$，当前 $R_{\min}=0.50\,\mathrm{m}$。 [实车参数](src/odin_nav_sim/config/nav2_real.yaml)
+- **遇阻与到点。** 单点和途经点共用遇阻逻辑。近段受阻先停等，远段受阻且近段有效时可切换到同向替代路径，持续无路则结束目标。途经点在近折返处停稳转向。末端按同一时刻的 TF 计算路径末点与车体的距离、航向误差，轮速和误差持续达标 0.3 秒后报到。 [遇阻逻辑](src/odin_nav_sim/src/obstacle_navigation.cpp) · [控制器](src/odin_nav_sim/src/delta_pursuit_controller.cpp)
+- **速度保护。** 根据指令速度和实测轮速检查近处点云。平移方向的检查距离采用 $d=m+v t_r+v^2/(2a)$，其中 $m$ 为距离余量，$t_r$ 为反应时间，$a$ 为配置的减速度。近障命中或点云、里程计、TF、速度指令超时会输出零速。 [速度保护节点](src/odin_nav_sim/scripts/navigation_velocity_guard.py)
 
-## 二、首次运行环境配置（仅需配置一次）
+## 构建
 
-### 1. 配置 USB 权限规则 (Udev)
-留形模组通过 USB 3.0 与电脑通信，需要在系统配置 Udev 规则以获取设备读写权限：
+依赖已就绪后，在加载了 ROS 2 Humble 的终端进入仓库根目录构建。
 
 ```bash
-# 1. 写入 udev 规则
-sudo bash -c 'cat <<EOF > /etc/udev/rules.d/99-odin-usb.rules
-SUBSYSTEM=="usb", ATTR{idVendor}=="2207", ATTR{idProduct}=="0019", MODE="0666", GROUP="plugdev"
-EOF'
-
-# 2. 重新加载并触发规则
-sudo udevadm control --reload
-sudo udevadm trigger
+colcon build
 ```
 
-### 2. 硬件连接注意事项
-* **务必插入电脑的原生 USB 3.0 接口**（蓝色接口）。
-* 尽量**不要使用未外接供电的拓展坞/Hub**，留形内部有嵌入式计算芯片和激光器，瞬时功耗较大。
-* 插入后可通过 `lsusb` 查看是否有 `2207:0019` 设备。
+新工作区需要准备以下依赖。
 
----
+- **第三方源码。** `dependencies.repos` 固定两个松灵仓库的提交。 `ranger_ros2` 提供 `agx_bringup` 的底盘消息，`ugv_gazebo_sim` 提供 Ranger Delta 的 URDF 和网格。安装 `python3-vcstool` 后执行 `vcs import src < dependencies.repos`，源码会放到 `src/vendor/`。 [源码版本清单](dependencies.repos)
+- **ROS 2 与系统库。** 加载 `/opt/ros/humble/setup.bash`。项目使用 Nav2（含 MPPI）、RViz2、TF2，以及 PCL、Qt5、OpenCV 等开发库。ODIN1 驱动需要 `libusb-1.0-0-dev`，松灵源码用到 `libboost-dev`。已配置 rosdep 时，可用 `rosdep install --from-paths src --ignore-src --rosdistro humble -y` 安装包清单中声明的依赖。 [ODIN1 驱动依赖与 USB 权限](src/odin_ros_driver/README.md)
 
-## 三、编译工作空间
+已有工作区若使用 `--symlink-install` 构建，增量构建可继续沿用该选项。
 
-新检出工作空间时，进入项目根目录并恢复固定版本的松灵驱动和 Delta 模型。ROS 2 描述包会安装原厂 URDF 和网格所需的资产。
+## 运行
 
-```bash
-cd /home/leona/WorkingSpace/navigation2/project_slam
-sudo apt install python3-vcstool libboost-dev nlohmann-json3-dev
-vcs import src < dependencies.repos
-```
+在新终端从仓库根目录执行 `source install/setup.bash`。
 
-项目已包含留形的预编译静态库 `liblydHostApi_amd.a`。在新终端中进入项目根目录，加载 Humble 并构建工作空间。
+| 任务 | 仓库根目录下的命令 |
+|---|---|
+| 导航仿真 | `ros2 launch odin_nav_sim navigation_sim.launch.py` |
+| 采图 | `./scripts/capture_odin_map.sh` |
+| 实车导航 | `./scripts/run_real_navigation.sh` |
 
-```bash
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install
-```
-
-只编译底盘及其依赖时，用 `colcon build --packages-up-to ranger_delta_bringup --symlink-install`。
-
-编译后，在项目根目录的每个新终端执行 `source install/setup.bash`。底盘运行与验收见 [底盘反馈回放](docs/PROGRESS.md#阶段-2-底盘反馈回放)。
-
----
-
-## 四、启动与建图测试
-
-### 方式 A：一键全启动（推荐）
-包含 **留形驱动** + **SLAM 控制窗口** + **预设 RViz2 视图**：
-
-```bash
-cd /home/leona/WorkingSpace/navigation2/project_slam
-source install/setup.bash
-ros2 launch odin_slam slam_bringup.launch.py
-```
-
-> **可选参数**：
-> * 不弹 RViz2：`ros2 launch odin_slam slam_bringup.launch.py launch_rviz:=false`
-
----
-
-### 方式 B：分终端启动（方便分别查看驱动日志与建图状态）
-
-* **终端 1：启动传感器驱动**
-  ```bash
-  cd /home/leona/WorkingSpace/navigation2/project_slam
-  source install/setup.bash
-  ros2 launch odin_ros_driver odin1_ros2.launch.py
-  ```
-  *(检查输出是否提示 `Device connected` 与 `Start stream success`)*
-
-* **终端 2：启动 SLAM 节点与控制窗口**
-  ```bash
-  cd /home/leona/WorkingSpace/navigation2/project_slam
-  source install/setup.bash
-  ros2 launch odin_slam odin_slam.launch.py
-  ```
-
-* **终端 3：单独打开预设配置的 RViz2（可选）**
-  ```bash
-  rviz2 -d $(ros2 pkg prefix odin_ros_driver)/share/odin_ros_driver/config/odin_ros2.rviz
-  ```
-
----
-
-## 五、建图操作指引
-
-启动后会弹出一个名为 **`control_dialog`** 的小窗口，包含三个按钮：
-
-1. **运行 SLAM**：
-   * 点击后开始监听并累加 `/odin1/cloud_slam` 点云。
-   * 手持留形传感器在房间或走廊内**平稳慢速移动**，绕行一圈形成闭环。
-   * 在 RViz2 中可以看到点云被实时拼接在固定坐标系 `odom` 下。
-2. **暂停 SLAM**：
-   * 行走结束或需要暂停时点击，停止累加点云。
-3. **保存结果**：
-   * 点击后，程序会对累加的点云执行：
-     1. `CropBox` 空间裁剪滤波
-     2. `VoxelGrid` 体素降采样（默认 0.02m 分辨率）
-     3. `StatisticalOutlierRemoval` 离群噪点剔除
-   * 点云地图会自动保存至 `project_slam/maps/` 目录下（如 `0.pcd`, `1.pcd`）。
-
----
-
-## 六、查看建图结果
-
-安装或使用 PCL 查看器查看生成的点云地图：
-
-```bash
-# 安装 pcl-tools (若未安装)
-sudo apt install -y pcl-tools
-
-# 查看点云
-pcl_viewer /home/leona/WorkingSpace/navigation2/project_slam/maps/0.pcd
-```
-
-在 `pcl_viewer` 中：
-* 观察墙壁厚度（反映手持漂移大小与建图精度）。
-* 观察回到起点时墙面是否有重影或断层（检验闭环效果）。
-
----
-
-## 七、常用诊断命令
-
-如果传感器未出数据，可以使用以下命令排查：
-
-```bash
-# 查看是否有 odin 话题
-ros2 topic list | grep odin
-
-# 查看高频里程计频率（正常约为 400Hz）
-ros2 topic hz /odin1/odometry_highfreq
-
-# 查看 SLAM 点云频率（正常约为 10-15Hz）
-ros2 topic hz /odin1/cloud_slam
-
-# 查看 IMU 频率（正常约为 400Hz）
-ros2 topic hz /odin1/imu
-```
+- **采图。** 在 Qt 窗口启动 SLAM，低速绕行后停稳、暂停并保存。RViz 的 Fixed Frame 设为 `odom`。采集目录包含点云 `1.pcd` 和设备重定位地图 `map.bin`。
+- **实车。** 在启动脚本中设置地图目录、雷达外参和 CAN 接口。导航加载二维栅格 `site_nav.yaml`、`site_nav.pgm`，重定位加载同批次的 `map.bin`。移动地图目录后更新 `odin_relocalization.yaml` 中的设备地图绝对路径。脚本默认启用底盘控制，停车联调时将脚本中的 `enable_control` 改为 `false`。 [实车启动脚本](scripts/run_real_navigation.sh) · [CAN 与停车验收](docs/PROGRESS.md#终端-1-启动导航)
