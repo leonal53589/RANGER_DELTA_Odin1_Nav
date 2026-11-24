@@ -1,4 +1,4 @@
-# Stationary ODIN1 relocalization check for this capture.
+# ODIN1 relocalization for the 2026-11-24 site capture.
 register_keys:
   strict_usb3.0_check: 1
   use_host_ros_time: 2
@@ -41,7 +41,7 @@ register_keys:
   - 1.0
   custom_init_pose_search_radius: 4.0
   custom_init_pose_max_rot_deg: 180.0
-  relocalization_map_abs_path: /home/leona/WorkingSpace/navigation2/project_slam/maps/odin_20261121_190632_Al1jxA/map.bin
+  relocalization_map_abs_path: /home/leona/WorkingSpace/navigation2/project_slam/maps/odin_20261124_192624_a0FBCc/map.bin
   mapping_result_dest_dir: ''
   mapping_result_file_name: ''
   sendimagemask: 0

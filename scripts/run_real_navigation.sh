@@ -4,7 +4,7 @@ set -eo pipefail
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
 # 实车配置在这里修改。enable_control=false 可用于停车联调。
-map_dir="$project_dir/maps/odin_20261121_190632_Al1jxA"
+map_dir="$project_dir/maps/odin_20261124_192624_a0FBCc"
 sensor_x=0.210
 sensor_y=0.0
 sensor_z=1.125

@@ -4,7 +4,8 @@
 
 - 新场地地图已通过短程实车导航和重复绕障。控制器按 Ranger Delta 的 0.50 m 最小行驶转弯半径跟踪路径，普通导航使用 10 cm 到点容差。按[实车启动步骤](#终端-1-启动导航)完成停车验收后，再开启底盘控制。
 - 同一次定位会话的实车 A/B 中，时间对齐版从 **10.79 s 缩短到 7.19 s** 报到，停稳用时从 **11.50 s 缩短到 7.47 s**。这版仍在实验入口验证。最新对齐轮尺量距 B **2.94 cm**，后续优先核对实体目标到地图的换算以及跨会话定位偏差。
-- 本地录包和调试日志已移出工作区，以下旧日志链接可在恢复 `log/` 后查看。普通实车导航依赖新场地的 `site_nav.yaml`、`site_nav.pgm` 和同次采集的本地 `map.bin`。
+- 实车脚本默认加载 `maps/odin_20261124_192624_a0FBCc` 的 5 cm 栅格和同次采集的 `map.bin`。新图已通过本轮实车导航测试。栅格下缘碰到 `Y = −10 m` 的 PCD 裁剪线，上方窄口在当前代价图中与主通道断开。
+- 本地录包和调试日志已移出工作区，以下旧日志链接可在恢复 `log/` 后查看。
 
 ### 本轮导航可靠性改动
 
@@ -163,13 +164,13 @@ RViz2 启动后，等 `Navigation` 显示 `active`。用 `Nav2 Goal` 在隔墙�
 - 绕椅子调试用居中路径、0.22 m 前视距离和 0.04 m/s 线速度上限，分两段走完约 2.30 m，并在 0.10 m 到点容差内停稳。标准 RViz 入口加载 [实车默认参数](../src/odin_nav_sim/config/nav2_real.yaml)，由 Nav2 根据当前代价地图规划。
 - 上一版地图省略 `odin_reference_pcd` 后，4 次目标有 3 次成功，1 次报 `Failed to make progress`。启用参考 PCD 时曾出现 ODIN1 报重定位成功、定位桥仍未发布 `map → odom`，以及行驶中 TF 过期。参考 PCD 复核在回放中拦截过约 13 cm 的错误校正，但实时点云与旧图重叠不足时也会阻止 TF 更新。
 
-## 新场地地图验收（2026-11-21）
+## 场地地图验收（2026-11-24）
 
-- 导航切换到 `maps/odin_20261121_190632_Al1jxA`。[5 cm 栅格配置](../maps/odin_20261121_190632_Al1jxA/site_nav.yaml) 已在仿真中加载并生成全局代价地图。同批次的 `map.bin` 已通过实车停车重定位，`map → base_link` 持续更新，短距离导航已通过。实时障碍的标记和清除待单独验收。
+- 11 月 21 日的试验地图曾通过停车重定位和短距离导航。本轮已用全场采集的 [5 cm 栅格配置](../maps/odin_20261124_192624_a0FBCc/site_nav.yaml) 和同批次设备地图替换。
 
 ### 终端 1 启动导航
 
-2026-11-24 重新固定 ODIN1。当前 `base_link → lidar` 平移为 `(0.210, 0, 1.125) m`，三个安装角均为 `0 rad`。项目 `base_link` 原点在地面平面，`sensor_z` 直接使用量得的离地高度。换位后先停车复核旧图重定位和实时点云对齐。
+2026-11-24 重新固定 ODIN1。当前 `base_link → lidar` 平移为 `(0.210, 0, 1.125) m`，三个安装角均为 `0 rad`。项目 `base_link` 原点在地面平面，`sensor_z` 直接使用量得的离地高度。
 
 底盘和 ODIN1 上电，先关闭之前单独启动的 ODIN1、底盘反馈和导航节点。用 `ip -details link show can0` 检查 CAN 接口，未启用时运行 `sudo ip link set dev can0 up type can bitrate 500000`。
 
@@ -180,7 +181,7 @@ cd /home/leona/WorkingSpace/navigation2/project_slam
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=44 ROS_LOCALHOST_ONLY=1 PYTHONNOUSERSITE=1
-MAP_DIR="$PWD/maps/odin_20261121_190632_Al1jxA"
+MAP_DIR="$PWD/maps/odin_20261124_192624_a0FBCc"
 
 ros2 launch odin_nav_sim real_navigation.launch.py \
   map:="$MAP_DIR/site_nav.yaml" \
@@ -204,7 +205,7 @@ ros2 topic echo /navigation_velocity_guard/state --qos-durability transient_loca
 ros2 topic info /cmd_vel_guarded --verbose
 ```
 
-把车停在新图采图起点附近，朝向尽量与采图时一致。确认底盘状态正常、TF 持续更新、控制器为 `active`。实车 RViz 默认叠加静态地图、全局和局部代价地图以及全局路径。可单独勾选两张代价地图，观察障碍出现或消失后路径是否变化。需要核对墙线和地图对齐时，在 `map` 固定坐标系下添加 `/odin1/cloud_raw`，并检查地图坐标约 `(1.12, -1.70) m` 的小块静态占用。
+把车停在新图采图起点附近，朝向尽量与采图时一致。确认底盘状态正常、TF 持续更新、控制器为 `active`。实车 RViz 默认叠加静态地图、全局和局部代价地图以及全局路径。可单独勾选两张代价地图，观察障碍出现或消失后路径是否变化。核对地图对齐时，在 `map` 固定坐标系下添加 `/odin1/cloud_raw`，对照现场的墙线和门框。
 
 停车验收通过后，停止上一轮导航，在项目根目录运行 `./scripts/run_real_navigation.sh`。脚本默认启用底盘控制和 RViz，地图目录、雷达外参和启动选项都在脚本开头修改。用 **Nav2 Goal** 先测空地短直行、到点朝向和取消停车，再跑一组绕障路线。随后用未写入静态图的可移动物体验证实时标记与清除，记录 `/plan`、`/cmd_vel`、`/odom`、TF 和两张代价地图。出现进度超时时，先对照定位和实际运动，再调整控制参数。
 
