@@ -5,4 +5,7 @@
   <class type="odin_nav_sim::SettledGoalChecker" base_class_type="nav2_core::GoalChecker">
     <description>Accepts the synchronized parking result from DeltaPursuitController.</description>
   </class>
+  <class type="odin_nav_sim::StationController" base_class_type="nav2_core::Controller">
+    <description>Fine alignment to station A using measured wall offsets.</description>
+  </class>
 </library>

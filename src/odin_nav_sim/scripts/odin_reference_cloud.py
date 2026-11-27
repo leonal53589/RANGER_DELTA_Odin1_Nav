@@ -73,7 +73,7 @@ class MapCorrectionCheck:
     """Keep local ODIN odometry live while checking significant global corrections."""
 
     def __init__(self, filename):
-        self.reference = ReferenceCloud(filename)
+        self.reference = filename if isinstance(filename, ReferenceCloud) else ReferenceCloud(filename)
         self.clouds = deque(maxlen=12)
         self.accepted = None
         self.pending = None

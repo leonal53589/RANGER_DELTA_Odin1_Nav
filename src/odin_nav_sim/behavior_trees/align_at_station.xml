@@ -1,0 +1,10 @@
+<root main_tree_to_execute="Station">
+  <BehaviorTree ID="Station">
+    <ReactiveSequence>
+      <StationGoalPath goal="{goal}" station_path="{station_path}"/>
+      <Sequence>
+        <FollowPath path="{station_path}" controller_id="StationAlign" goal_checker_id="goal_checker"/>
+      </Sequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

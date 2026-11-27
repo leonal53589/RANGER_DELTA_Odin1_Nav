@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+import numpy as np
 import yaml
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
@@ -14,6 +15,16 @@ from launch_ros.actions import Node, SetRemap
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import RewrittenYaml
+
+
+def configure_station(configuration, target):
+    controller = configuration['controller_server']['ros__parameters']
+    controller['controller_plugins'].append('StationAlign')
+    controller['StationAlign'] = {'plugin': 'odin_nav_sim::StationController', 'target': target}
+    configuration['bt_navigator']['ros__parameters']['station_a_target'] = list(target)
+    smoother = configuration['velocity_smoother']['ros__parameters']
+    smoother['min_velocity'][1], smoother['max_velocity'][1] = -0.03, 0.03
+    configuration['global_costmap']['global_costmap']['ros__parameters']['always_send_full_costmap'] = True
 
 
 def launch_setup(context):
@@ -71,20 +82,28 @@ def launch_setup(context):
         odin_tf_remappings = [('/tf', '/odin1/tf'), ('/tf_static', '/odin1/tf_static')]
     nav2_params = PathJoinSubstitution([pkg_nav, 'config', 'nav2_real.yaml'])
     cleanup = []
-    if goal_time_ab:
+    station = LaunchConfiguration('station_reference').perform(context)
+    if station and (goal_time_ab or not odin_relocalization_config):
+        raise ValueError('station alignment requires normal Nav2 and ODIN relocalization')
+    if goal_time_ab or station:
         config = Path(get_package_share_directory('odin_nav_sim')) / 'config/nav2_real.yaml'
         configuration = yaml.safe_load(config.read_text())
         controller = configuration['controller_server']['ros__parameters']
-        controller.update(
-            goal_checker_plugins=['goal_checker', 'goal_checker_aligned'],
-            aligned_goal_checker_id='goal_checker_aligned',
-            trace_goal_tf_time=True,
-        )
-        controller['goal_checker']['plugin'] = 'nav2_controller::SimpleGoalChecker'
-        controller['FollowPath'].pop('tracking_controller', None)
-        controller['FollowPath'].pop('tracking', None)
-        controller['goal_checker_aligned'] = controller['goal_checker'].copy()
-        controller['goal_checker_aligned'].update(xy_goal_tolerance=0.06, yaw_goal_tolerance=0.10)
+        if goal_time_ab:
+            controller.update(
+                goal_checker_plugins=['goal_checker', 'goal_checker_aligned'],
+                aligned_goal_checker_id='goal_checker_aligned',
+                trace_goal_tf_time=True,
+            )
+            controller['goal_checker']['plugin'] = 'nav2_controller::SimpleGoalChecker'
+            controller['FollowPath'].pop('tracking_controller', None)
+            controller['FollowPath'].pop('tracking', None)
+            controller['goal_checker_aligned'] = controller['goal_checker'].copy()
+            controller['goal_checker_aligned'].update(xy_goal_tolerance=0.06, yaw_goal_tolerance=0.10)
+        else:
+            with np.load(station, allow_pickle=False) as ref:
+                target = ref['map_pose'].tolist()
+            configure_station(configuration, target)
         with NamedTemporaryFile(mode='w', suffix='.yaml', encoding='utf-8', delete=False) as output:
             yaml.safe_dump(configuration, output)
         test_params = Path(output.name)
@@ -107,6 +126,9 @@ def launch_setup(context):
             convert_types=True,
         )
     rviz_config = PathJoinSubstitution([pkg_nav, 'rviz', 'real_navigation.rviz'])
+    parking_reference = LaunchConfiguration('parking_reference').perform(context)
+    if parking_reference and not Path(parking_reference).is_file():
+        raise ValueError(f'Parking reference file missing: {parking_reference}')
 
     nodes = [
         # 1. 底盘反馈节点 (SocketCAN 接收，发布 /odom 与 odom -> base_link TF)
@@ -189,6 +211,14 @@ def launch_setup(context):
         ]),
     ]
 
+    if station:
+        nodes.append(Node(package='odin_nav_sim', executable='station_observation', output='screen',
+                          parameters=[{'reference': station}],
+                          additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}))
+    if parking_reference:
+        nodes.append(Node(package='odin_nav_sim', executable='parking_check',
+                          arguments=['watch', parking_reference], output='screen'))
+
     # Only one source may publish the global map -> odom transform.
     if odin_relocalization_config:
         nodes.append(Node(
@@ -242,6 +272,10 @@ def generate_launch_description():
         DeclareLaunchArgument('goal_profile', default_value='navigation',
                               choices=['navigation', 'precision'],
                               description='通行或精确停车的规划与到点容差'),
+        DeclareLaunchArgument('station_reference', default_value='',
+                              description='工位 A 墙面闭环使用的参考帧 .npz'),
+        DeclareLaunchArgument('parking_reference', default_value='',
+                              description='可选的停车参考帧 .npz，到点后只读复核'),
         DeclareLaunchArgument('goal_time_ab', default_value='false', choices=['true', 'false'],
                               description='精确停车实验中按目标选择原始或时间对齐判定'),
         DeclareLaunchArgument('enable_control', default_value='false', choices=['true', 'false'], description='是否允许向底盘下发控制指令'),

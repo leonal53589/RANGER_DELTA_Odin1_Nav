@@ -10,6 +10,7 @@
 #include "behaviortree_cpp_v3/bt_factory.h"
 #include "behaviortree_cpp_v3/control_node.h"
 #include "nav2_util/robot_utils.hpp"
+#include "nav2_util/node_utils.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "tf2/utils.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -461,9 +462,48 @@ private:
   Failure last_failure_{Failure::Planning};
 };
 
+// Re-read the requested goal on each tick, including preemptions during fine alignment.
+class StationGoalPath : public BT::SyncActionNode
+{
+public:
+  StationGoalPath(const std::string & name, const BT::NodeConfiguration & config)
+  : BT::SyncActionNode(name, config)
+  {
+    auto node = config.blackboard->get<rclcpp::Node::SharedPtr>("node");
+    nav2_util::declare_parameter_if_not_declared(node, "station_a_target",
+      rclcpp::ParameterValue(std::vector<double>{}));
+    target_ = node->get_parameter("station_a_target").as_double_array();
+  }
+  static BT::PortsList providedPorts()
+  {
+    return {BT::InputPort<Pose>("goal"), BT::OutputPort<Path>("station_path")};
+  }
+  Status tick() override
+  {
+    auto goal = getInput<Pose>("goal");
+    if (!goal || target_.size() != 3 || goal.value().header.frame_id != "map") {
+      return Status::FAILURE;
+    }
+    const auto & p = goal.value().pose;
+    if (!(std::hypot(p.position.x - target_[0], p.position.y - target_[1]) <= 0.001 &&
+      std::abs(std::remainder(tf2::getYaw(p.orientation) - target_[2], 2*M_PI)) <= 0.002))
+    {
+      return Status::FAILURE;
+    }
+    Path path;
+    path.header = goal.value().header;
+    path.poses.push_back(goal.value());
+    setOutput("station_path", path);
+    return Status::SUCCESS;
+  }
+private:
+  std::vector<double> target_;
+};
+
 }  // namespace odin_nav_sim
 
 BT_REGISTER_NODES(factory)
 {
+  factory.registerNodeType<odin_nav_sim::StationGoalPath>("StationGoalPath");
   factory.registerNodeType<odin_nav_sim::ObstacleNavigation>("ObstacleNavigation");
 }

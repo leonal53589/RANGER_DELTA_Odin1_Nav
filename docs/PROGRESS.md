@@ -33,7 +33,7 @@ ROS_DOMAIN_ID=87 ROS_LOCALHOST_ONLY=1 PYTHONNOUSERSITE=1 \
 ## 已实测
 
 - 设备 `2207:0019` 经 Realtek Hub 以 `5000M`（USB 3.0，5 Gbit/s）连接。ROS 2 Humble 驱动正常出流，点云约 10.2 Hz，IMU 和高频里程计各约 400 Hz。
-- Qt 窗口采集约 15 秒，成功保存 [maps/1.pcd](../maps/1.pcd)，已验证包含 23,453 个有效 XYZ 点。当前 `custom_map_mode: 0`，主机在 `odom` 坐标系下累加点云。已确认 RViz2 实时查看正常。
+- Qt 窗口采集约 15 秒，初版样图包含 23,453 个有效 XYZ 点。当前 `custom_map_mode: 0`，主机在 `odom` 坐标系下累加点云。已确认 RViz2 实时查看正常。
 - 待验证手持移动时的拼接精度、漂移和设备 SLAM 模式的回环效果。
 
 ## RViz2 实时查看
@@ -44,14 +44,17 @@ RViz2 的 `Fixed Frame` 设为 `odom`。在 `slam_current` 中订阅 `/odin1/clo
 
 ## 查看已保存的地图
 
-在项目根目录用 `pcl_viewer maps/1.pcd` 直接打开。也可以在加载了 `install/setup.bash` 的终端把 PCD 发布给 RViz2。
+在项目根目录指定要查看的采图文件。也可用同一文件向 RViz2 发布点云。
 
 ```bash
+PCD="$PWD/maps/odin_20261124_192624_a0FBCc/1.pcd"
+pcl_viewer "$PCD"
+# 或者在已加载工作空间的终端发布
 ros2 run pcl_ros pcd_to_pointcloud --ros-args \
-  -p file_name:="$PWD/maps/1.pcd" -p tf_frame:=odom -p publishing_period_ms:=1000
+  -p file_name:="$PCD" -p tf_frame:=odom -p publishing_period_ms:=1000
 ```
 
-在 RViz2 中设 `Fixed Frame` 为 `odom`，添加 `PointCloud2`，话题选 `/cloud_pcd`。已验证该话题发布了全部 23,453 个点，RViz2 窗口显示待实测。 [ROS 2 Humble 的 PCD 发布工具](https://github.com/ros-perception/perception_pcl/blob/humble/pcl_ros/tools/pcd_to_pointcloud.cpp)
+在 RViz2 中设 `Fixed Frame` 为 `odom`，添加 `PointCloud2`，话题选 `/cloud_pcd`。早期的 15 秒样图曾用该话题验证 23,453 个点。 [ROS 2 Humble 的 PCD 发布工具](https://github.com/ros-perception/perception_pcl/blob/humble/pcl_ros/tools/pcd_to_pointcloud.cpp)
 
 建图节点每次启动都从 `1.pcd` 开始编号，再次保存前先把现有地图另存。
 

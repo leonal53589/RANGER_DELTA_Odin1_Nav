@@ -161,7 +161,7 @@ mode: trinary
 
 def main():
     parser = argparse.ArgumentParser(description="PCD 3D点云转 Nav2 2D 占用栅格地图工具")
-    parser.add_argument("--input", "-i", required=True, help="输入的 3D PCD 点云文件路径 (如 maps/1.pcd)")
+    parser.add_argument("--input", "-i", required=True, help="输入的 3D PCD 点云文件路径")
     parser.add_argument("--output-dir", "-d", default="maps", help="输出地图目录 (默认: maps)")
     parser.add_argument("--name", "-n", default="real_map", help="输出地图基本名称 (默认: real_map)")
     parser.add_argument("--resolution", "-r", type=float, default=0.05, help="栅格地图分辨率 (米/像素, 默认: 0.05)")

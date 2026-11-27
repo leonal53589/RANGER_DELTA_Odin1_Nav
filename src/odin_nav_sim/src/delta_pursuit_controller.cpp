@@ -8,7 +8,7 @@
 #include <utility>
 
 #include "angles/angles.h"
-#include "nav2_controller/plugins/simple_goal_checker.hpp"
+#include "settled_goal_checker.hpp"
 #include "nav2_core/exceptions.hpp"
 #include "nav2_regulated_pure_pursuit_controller/regulated_pure_pursuit_controller.hpp"
 #include "pluginlib/class_loader.hpp"
@@ -21,29 +21,6 @@ namespace odin_nav_sim
 {
 
 using nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController;
-
-class SettledGoalChecker : public nav2_controller::SimpleGoalChecker
-{
-public:
-  void reset() override
-  {
-    SimpleGoalChecker::reset();
-    reached_ = false;
-  }
-
-  bool isGoalReached(
-    const geometry_msgs::msg::Pose &, const geometry_msgs::msg::Pose &,
-    const geometry_msgs::msg::Twist &) override
-  {
-    // Humble calls this after computeVelocityCommands, with an independently transformed goal.
-    return std::exchange(reached_, false);
-  }
-
-  void setReached(bool reached) {reached_ = reached;}
-
-private:
-  bool reached_{false};
-};
 
 class DeltaPursuitController : public RegulatedPurePursuitController
 {
