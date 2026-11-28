@@ -64,24 +64,34 @@ def save_reference(path, points, nav, map_id, stamp):
     with tempfile.NamedTemporaryFile(dir=path.parent) as temporary:
         np.savez_compressed(temporary, points=points, map_pose=nav, map_id=map_id, stamp_ns=stamp)
         temporary.flush()
-        os.link(temporary.name, path)  # Atomically create; never replace a measured station.
+        if path.exists():
+            path.unlink()
+        os.link(temporary.name, path)
 
 
 class StationObserver(Node):
-    def __init__(self, mode, path):
+    def __init__(self, mode, path, force=False):
         super().__init__('parking_check')
         self.mode = mode
         self.path = path
         self.matcher = None
+        if path.is_dir():
+            raise ValueError(f'Station reference path must be a file, not a directory: {path} (did you forget to set $REF to a file path?)')
         if mode == 'capture':
             if path.exists():
-                raise FileExistsError(f'Station reference already exists: {path}')
+                if force:
+                    path.unlink()
+                else:
+                    raise FileExistsError(f'Station reference already exists: {path} (use -f/--force to overwrite or rm the file)')
+            self.report_path = path.with_name(path.name + '.jsonl')
+            if force and self.report_path.exists():
+                self.report_path.unlink()
         else:
             with np.load(path, allow_pickle=False) as ref:
                 self.ref_pose = ref['map_pose']
                 self.ref_map = str(ref['map_id'])
                 self.matcher = ParkingKeyframe(ref['points'])
-        self.report_path = path.with_name(path.name + '.jsonl')
+            self.report_path = path.with_name(path.name + '.jsonl')
         self.map_id = None
         self.tf = Buffer()
         self.listener = TransformListener(self.tf, self)
@@ -290,11 +300,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=['capture', 'check', 'watch', 'decide'])
     parser.add_argument('reference', type=Path, help='station .npz path')
+    parser.add_argument('-f', '--force', action='store_true', help='overwrite existing reference file in capture mode')
     args = parser.parse_args(remove_ros_args()[1:])
     rclpy.init()
     observer = None
     try:
-        observer = StationObserver(args.mode, args.reference.expanduser().resolve())
+        observer = StationObserver(args.mode, args.reference.expanduser().resolve(), force=args.force)
         while rclpy.ok() and not observer.done:
             rclpy.spin_once(observer, timeout_sec=0.5)
         return 0 if observer.ok or args.mode == 'watch' else 1

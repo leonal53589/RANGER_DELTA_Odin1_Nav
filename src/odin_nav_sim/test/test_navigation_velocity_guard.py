@@ -1,10 +1,12 @@
 """Exercise the real guard callbacks and TF buffer without DDS or a CAN device."""
+import struct
 from unittest.mock import Mock
 
 import pytest
 from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.time import Time
+from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
 from std_msgs.msg import Header
 from tf2_ros import Buffer
@@ -131,3 +133,42 @@ def test_slowing_down_does_not_release_original_obstacle(monkeypatch):
     v.linear.x = .05
     NavigationVelocityGuard.velocity(f.g, v)
     assert f.tick() == 0 and f.g.reason == 'near obstacle'
+
+
+def test_packed_19_byte_stride_cloud_triggers_near_obstacle(monkeypatch):
+    f = Fixture(monkeypatch)
+    f.now += .01
+    msg = PointCloud2()
+    msg.header = Header(frame_id='lidar', stamp=Time(seconds=f.now).to_msg())
+    msg.height = 1
+    msg.width = 3
+    msg.point_step = 19
+    msg.row_step = 57
+    msg.fields = [
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+    ]
+    msg.data = b''.join(struct.pack('<fff7x', 0.45, 0.01, -0.5) for _ in range(3))
+    NavigationVelocityGuard.scan(f.g, msg)
+    assert f.tick() == 0 and f.g.reason == 'near obstacle'
+
+
+def test_narrow_corridor_passes_straight_while_spin_guards_full_radius(monkeypatch):
+    f = Fixture(monkeypatch)
+    f.g.radius, f.g.half_width, f.g.half_length, f.g.margin = 0.305, 0.27, 0.29, 0.03
+    f.now += .01
+    # 57 cm wide corridor walls at y=+/-0.285: wider than 54 cm straight width, inside 61 cm spin circle.
+    walls = [[0.20, 0.285, -0.5]] * 3 + [[0.20, -0.285, -0.5]] * 3
+    f.fill(points=walls)
+    v = Twist()
+    v.linear.x = 0.40
+    NavigationVelocityGuard.velocity(f.g, v)
+    assert f.tick() > 0.0 and f.g.reason is None
+
+    f.now += .025
+    f.fill(points=[[0.20, 0.21, -0.5]] * 3)  # r = 0.290 m <= 0.305 m spin radius
+    spin = Twist()
+    spin.angular.z = 0.35
+    NavigationVelocityGuard.velocity(f.g, spin)
+    assert f.tick() == 0.0 and f.g.reason == 'near obstacle'

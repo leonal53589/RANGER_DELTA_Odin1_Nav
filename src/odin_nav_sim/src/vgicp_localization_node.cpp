@@ -136,9 +136,9 @@ public:
 
     cold_innovation_xy_ = declare_parameter<double>("cold_innovation_xy", 0.50);
     cold_innovation_yaw_ = declare_parameter<double>("cold_innovation_yaw", 0.45);
-    moving_fusion_alpha_ = declare_parameter<double>("moving_fusion_alpha", 0.45);
-    moving_max_step_xy_ = declare_parameter<double>("moving_max_step_xy", 0.05);
-    moving_max_step_yaw_ = declare_parameter<double>("moving_max_step_yaw", 0.05);
+    moving_fusion_alpha_ = declare_parameter<double>("moving_fusion_alpha", 0.22);
+    moving_max_step_xy_ = declare_parameter<double>("moving_max_step_xy", 0.015);
+    moving_max_step_yaw_ = declare_parameter<double>("moving_max_step_yaw", 0.025);
     stationary_v_max_ = declare_parameter<double>("stationary_v_max", 0.015);
     stationary_w_max_ = declare_parameter<double>("stationary_w_max", 0.030);
 
@@ -621,15 +621,20 @@ private:
           }
         }
         if (!stationary && has_lock_ && has_lock_snapshot) {
-          // Slew-limited smooth update while driving so path tracking never sees TF steps.
+          // Slew-limited, geometry-weighted update while driving so degenerate corridors
+          // do not inject longitudinal map->odom oscillations into MPPI and costmaps.
+          const double geom_scale = std::clamp(
+            (fit.geometry_singular_ratio - 0.02) / 0.10, 0.20, 1.0);
+          const double eff_alpha = moving_fusion_alpha_ * geom_scale;
+          const double eff_max_step_xy = moving_max_step_xy_ * std::max(0.25, geom_scale);
           const double err_x = matched_base.x - predicted_base.x;
           const double err_y = matched_base.y - predicted_base.y;
           const double err_xy = std::hypot(err_x, err_y);
           const double err_yaw = std::remainder(matched_base.yaw - predicted_base.yaw, 2.0 * M_PI);
-          const double step_xy = std::min(moving_max_step_xy_, moving_fusion_alpha_ * err_xy);
+          const double step_xy = std::min(eff_max_step_xy, eff_alpha * err_xy);
           const double xy_scale = err_xy > 1e-9 ? step_xy / err_xy : 0.0;
           const double step_yaw = std::clamp(
-            moving_fusion_alpha_ * err_yaw, -moving_max_step_yaw_, moving_max_step_yaw_);
+            eff_alpha * err_yaw, -moving_max_step_yaw_, moving_max_step_yaw_);
           fused_base = {
             predicted_base.x + err_x * xy_scale,
             predicted_base.y + err_y * xy_scale,

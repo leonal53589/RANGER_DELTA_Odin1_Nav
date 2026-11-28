@@ -16,13 +16,14 @@ can_interface="${CAN_INTERFACE:-can0}"
 enable_control="${ENABLE_CONTROL:-true}"
 launch_rviz="${LAUNCH_RVIZ:-true}"
 goal_profile="${GOAL_PROFILE:-precision}"
+record_bag="${RECORD_BAG:-false}"
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-49}"
-export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
+export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
 export PYTHONNOUSERSITE=1
 
 if (( $# != 0 )); then
-    printf '此脚本直接运行，常用开关可通过环境变量覆盖（如 ENABLE_CONTROL=false）。\n' >&2
+    printf '此脚本直接运行，常用开关可通过环境变量覆盖（如 ENABLE_CONTROL=false、RECORD_BAG=true）。\n' >&2
     exit 2
 fi
 
@@ -43,13 +44,43 @@ fi
 cd -- "$project_dir"
 source "$project_dir/install/setup.bash"
 
-exec ros2 launch odin_nav_sim real_navigation.launch.py \
-    map:="$glim_map_dir/site_nav.yaml" \
-    localization_mode:=vgicp \
-    vgicp_reference_pcd:="$glim_map_dir/glim_reference.pcd" \
-    vgicp_localization_yaml:="$glim_map_dir/localization.yaml" \
-    odin_relocalization_config:="$odin_map_dir/odin_relocalization.yaml" \
-    sensor_x:="$sensor_x" sensor_y:="$sensor_y" sensor_z:="$sensor_z" \
-    sensor_roll:="$sensor_roll" sensor_pitch:="$sensor_pitch" sensor_yaw:="$sensor_yaw" \
-    can_interface:="$can_interface" enable_control:="$enable_control" launch_rviz:="$launch_rviz" \
+launch_args=(
+    map:="$glim_map_dir/site_nav.yaml"
+    localization_mode:=vgicp
+    vgicp_reference_pcd:="$glim_map_dir/glim_reference.pcd"
+    vgicp_localization_yaml:="$glim_map_dir/localization.yaml"
+    odin_relocalization_config:="$odin_map_dir/odin_relocalization.yaml"
+    sensor_x:="$sensor_x" sensor_y:="$sensor_y" sensor_z:="$sensor_z"
+    sensor_roll:="$sensor_roll" sensor_pitch:="$sensor_pitch" sensor_yaw:="$sensor_yaw"
+    can_interface:="$can_interface" enable_control:="$enable_control" launch_rviz:="$launch_rviz"
     goal_profile:="$goal_profile" goal_time_ab:=false odin_spin_guard:=false
+)
+
+if [[ "$record_bag" == "true" ]]; then
+    mkdir -p "$project_dir/bags"
+    bag_dir="$project_dir/bags/glim_diag_$(date +%Y%m%d_%H%M%S)"
+    printf '诊断录制已开启，rosbag 输出目录: %s\n' "$bag_dir"
+    ros2 bag record -s sqlite3 -o "$bag_dir" \
+        /tf /tf_static /odom /goal_pose /plan \
+        /cmd_vel /cmd_vel_nav /cmd_vel_guarded \
+        /local_costmap/costmap /local_costmap/costmap_updates \
+        /odin1/cloud_raw /rosout &
+    bag_pid=$!
+    cleanup() {
+        if [[ -n "${launch_pid:-}" ]] && kill -0 "$launch_pid" 2>/dev/null; then
+            kill -INT "$launch_pid" 2>/dev/null || true
+            wait "$launch_pid" 2>/dev/null || true
+        fi
+        if kill -0 "$bag_pid" 2>/dev/null; then
+            kill -INT "$bag_pid" 2>/dev/null || true
+            wait "$bag_pid" 2>/dev/null || true
+        fi
+    }
+    trap cleanup INT TERM EXIT
+    ros2 launch odin_nav_sim real_navigation.launch.py "${launch_args[@]}" &
+    launch_pid=$!
+    wait "$launch_pid"
+    exit $?
+fi
+
+exec ros2 launch odin_nav_sim real_navigation.launch.py "${launch_args[@]}"

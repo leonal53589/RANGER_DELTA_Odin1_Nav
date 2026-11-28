@@ -163,4 +163,67 @@ TEST(TerminalParkingTest, ObserveFreeOnlySupportsLateralCrabClearanceWhilePreser
   clearance.observe(live_origin, tf2::Vector3(0.0, -0.36, 0.4));
   EXPECT_FALSE(clearance.permits(map, 0.0, 0.0, right_yaw, -0.07, 0.30));
 }
+
+TEST(TerminalParkingTest, RelaxesInnerMarginForSmallResidualYawOnly)
+{
+  TerminalParking parking(0.55, 4.0);
+  EXPECT_DOUBLE_EQ(TerminalParking::repositionToleranceFactor(0.06, 0.05), 0.85);
+  EXPECT_DOUBLE_EQ(TerminalParking::repositionToleranceFactor(0.20, 0.05), kRepositionToleranceFactor);
+
+  EXPECT_EQ(parking.update({0.0, 0.020, 0.01, 0.022, 0.05, true, true}), Command::Hold);
+  EXPECT_EQ(parking.update({0.6, 0.025, 0.06, 0.022, 0.05, true, true}), Command::Hold);
+  EXPECT_EQ(parking.update({1.2, 0.025, 0.06, 0.022, 0.05, true, true}), Command::Hold);
+  EXPECT_EQ(parking.update({1.3, 0.025, 0.06, 0.022, 0.05, true, true}), Command::Reposition);
+  // With small residual yaw (0.06 < 0.14), 0.018 <= 0.85 * 0.022 (0.0187) exits directly to Align.
+  EXPECT_EQ(parking.update({1.5, 0.018, 0.06, 0.022, 0.05, false, true}), Command::AlignGoal);
+}
+
+TEST(TerminalParkingTest, PermitsDiagonalCrabSweepInObservedFreeSpace)
+{
+  using nav2_costmap_2d::FREE_SPACE;
+  nav2_costmap_2d::Costmap2D map(80, 80, 0.05, -2.0, -2.0, FREE_SPACE);
+  TerminalClearance clearance(map);
+  const tf2::Vector3 prior_origin(-0.40, 0.0, 0.8);
+  const tf2::Vector3 origin(0.0, 0.0, 0.8);
+  for (double angle = -1.57; angle <= 1.57; angle += 0.005) {
+    clearance.observeFreeOnly(
+      prior_origin, tf2::Vector3(-0.40 + 1.4 * std::cos(angle), 1.4 * std::sin(angle), 0.4));
+    clearance.observe(origin, tf2::Vector3(1.2 * std::cos(angle), 1.2 * std::sin(angle), 0.4));
+  }
+  EXPECT_TRUE(clearance.permits(map, 0.0, 0.0, -M_PI_4, 0.08, 0.30));
+  clearance.observe(origin, tf2::Vector3(0.28, -0.28, 0.3));
+  EXPECT_FALSE(clearance.permits(map, 0.0, 0.0, -M_PI_4, 0.08, 0.30));
+}
+
+TEST(TerminalParkingTest, ReportsExactClearanceRejectionReason)
+{
+  using nav2_costmap_2d::FREE_SPACE;
+  using nav2_costmap_2d::LETHAL_OBSTACLE;
+  nav2_costmap_2d::Costmap2D map(80, 80, 0.05, -2.0, -2.0, FREE_SPACE);
+  TerminalClearance clearance(map);
+  TerminalClearance::Report report;
+  EXPECT_FALSE(clearance.permits(map, 0.0, 0.0, 0.0, 0.08, 0.30, &report));
+  EXPECT_EQ(report.reason, TerminalClearance::RejectReason::Unobserved);
+  EXPECT_GT(report.unknown_cells, 0u);
+
+  const tf2::Vector3 origin(0.0, 0.0, 0.8);
+  for (double angle = -1.57; angle <= 1.57; angle += 0.005) {
+    clearance.observe(origin, tf2::Vector3(1.2 * std::cos(angle), 1.2 * std::sin(angle), 0.4));
+  }
+  EXPECT_TRUE(clearance.permits(map, 0.0, 0.0, 0.0, 0.08, 0.30, &report));
+  EXPECT_EQ(report.reason, TerminalClearance::RejectReason::Cleared);
+
+  clearance.observe(origin, tf2::Vector3(0.36, 0.0, 0.14));
+  EXPECT_FALSE(clearance.permits(map, 0.0, 0.0, 0.0, 0.08, 0.30, &report));
+  EXPECT_EQ(report.reason, TerminalClearance::RejectReason::CloudLethal);
+  EXPECT_EQ(report.cloud_hits, 1u);
+  EXPECT_NEAR(report.cloud_z, 0.14, 1e-4);
+
+  unsigned int cx, cy;
+  ASSERT_TRUE(map.worldToMap(0.32, 0.0, cx, cy));
+  map.setCost(cx, cy, LETHAL_OBSTACLE);
+  EXPECT_FALSE(clearance.permits(map, 0.0, 0.0, 0.0, 0.08, 0.30, &report));
+  EXPECT_EQ(report.reason, TerminalClearance::RejectReason::CostmapLethal);
+  EXPECT_EQ(report.costmap_cost, LETHAL_OBSTACLE);
+}
 }  // namespace odin_nav_sim

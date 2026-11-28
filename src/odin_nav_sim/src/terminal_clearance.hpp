@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -38,10 +41,43 @@ inline std::optional<double> axialSweepDistance(
 class TerminalClearance : private nav2_costmap_2d::Costmap2D
 {
 public:
+  enum class RejectReason
+  {
+    Cleared,
+    NoCloud,
+    StaleCloud,
+    TfFailure,
+    OutOfBounds,
+    CostmapLethal,
+    CloudLethal,
+    Unobserved,
+    NoNewCells
+  };
+
+  struct Report
+  {
+    RejectReason reason{RejectReason::Cleared};
+    double block_x{0.0};
+    double block_y{0.0};
+    double block_dist{0.0};
+    double cloud_z{0.0};
+    unsigned int cloud_hits{0};
+    unsigned int costmap_cost{0};
+    unsigned int swept_cells{0};
+    unsigned int free_cells{0};
+    unsigned int unknown_cells{0};
+    unsigned int prior_scans_fed{0};
+    unsigned int prior_scans_ok{0};
+    double cloud_age{0.0};
+    std::size_t live_points{0};
+  };
+
   explicit TerminalClearance(const nav2_costmap_2d::Costmap2D & map)
   : Costmap2D(map.getSizeInCellsX(), map.getSizeInCellsY(), map.getResolution(),
       map.getOriginX(), map.getOriginY(), nav2_costmap_2d::NO_INFORMATION),
-    traced_(static_cast<size_t>(map.getSizeInCellsX()) * map.getSizeInCellsY(), false)
+    traced_(static_cast<size_t>(map.getSizeInCellsX()) * map.getSizeInCellsY(), false),
+    hit_count_(traced_.size(), 0),
+    hit_z_(traced_.size(), -1.0f)
   {}
 
   void markRecentlyOccupied(double x, double y, double radius)
@@ -86,8 +122,11 @@ public:
 
   bool permits(
     const nav2_costmap_2d::Costmap2D & map, double x, double y, double yaw, double travel,
-    double radius) const
+    double radius, Report * report = nullptr) const
   {
+    if (report) {
+      *report = Report{};
+    }
     const double cos_yaw = std::cos(yaw);
     const double sin_yaw = std::sin(yaw);
     const double end_x = x + travel * cos_yaw;
@@ -98,9 +137,18 @@ public:
     if (!worldToMap(std::min(x, end_x) - extent, std::min(y, end_y) - extent, x_min, y_min) ||
       !worldToMap(std::max(x, end_x) + extent, std::max(y, end_y) + extent, x_max, y_max))
     {
+      if (report) {
+        report->reason = RejectReason::OutOfBounds;
+      }
       return false;
     }
     bool has_new_cells = false;
+    bool blocked = false;
+    int best_priority = -1;
+    double best_dist = std::numeric_limits<double>::infinity();
+    unsigned int swept_cells = 0;
+    unsigned int free_cells = 0;
+    unsigned int unknown_cells = 0;
     for (unsigned int cy = y_min; cy <= y_max; ++cy) {
       for (unsigned int cx = x_min; cx <= x_max; ++cx) {
         double wx, wy;
@@ -115,12 +163,61 @@ public:
         }
         const bool newly_swept = std::hypot(dx, dy) > extent;
         has_new_cells = has_new_cells || newly_swept;
-        if (map.getCost(cx, cy) >= nav2_costmap_2d::LETHAL_OBSTACLE ||
-          (newly_swept && getCost(cx, cy) != nav2_costmap_2d::FREE_SPACE))
-        {
-          return false;
+        const unsigned char map_cost = map.getCost(cx, cy);
+        const unsigned char clear_cost = getCost(cx, cy);
+        if (newly_swept) {
+          ++swept_cells;
+          if (clear_cost == nav2_costmap_2d::FREE_SPACE) {
+            ++free_cells;
+          } else if (clear_cost == nav2_costmap_2d::NO_INFORMATION) {
+            ++unknown_cells;
+          }
+        }
+        RejectReason cell_reason = RejectReason::Cleared;
+        int priority = 0;
+        if (map_cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {
+          cell_reason = RejectReason::CostmapLethal;
+          priority = 2;
+        } else if (newly_swept && clear_cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
+          cell_reason = RejectReason::CloudLethal;
+          priority = 2;
+        } else if (newly_swept && clear_cost != nav2_costmap_2d::FREE_SPACE) {
+          cell_reason = RejectReason::Unobserved;
+          priority = 1;
+        }
+        if (cell_reason != RejectReason::Cleared) {
+          if (!report) {
+            return false;
+          }
+          blocked = true;
+          const double cell_dist = std::hypot(dx, dy);
+          if (priority > best_priority || (priority == best_priority && cell_dist < best_dist)) {
+            best_priority = priority;
+            best_dist = cell_dist;
+            const auto idx = getIndex(cx, cy);
+            report->reason = cell_reason;
+            report->block_x = wx;
+            report->block_y = wy;
+            report->block_dist = cell_dist;
+            report->costmap_cost = map_cost;
+            report->cloud_hits = hit_count_[idx];
+            report->cloud_z = hit_z_[idx] >= 0.0f ? static_cast<double>(hit_z_[idx]) : 0.0;
+          }
         }
       }
+    }
+    if (report) {
+      report->swept_cells = swept_cells;
+      report->free_cells = free_cells;
+      report->unknown_cells = unknown_cells;
+      if (blocked) {
+        return false;
+      }
+      if (!has_new_cells) {
+        report->reason = RejectReason::NoNewCells;
+        return false;
+      }
+      return true;
     }
     return has_new_cells;
   }
@@ -140,6 +237,13 @@ private:
     unsigned int x, y, ox, oy;
     if (mark_obstacle && hit.z() >= min_obstacle_height && worldToMap(hit.x(), hit.y(), x, y)) {
       setCost(x, y, nav2_costmap_2d::LETHAL_OBSTACLE);
+      const auto hit_idx = getIndex(x, y);
+      if (hit_count_[hit_idx] < std::numeric_limits<uint16_t>::max()) {
+        ++hit_count_[hit_idx];
+      }
+      if (hit.z() > hit_z_[hit_idx]) {
+        hit_z_[hit_idx] = static_cast<float>(hit.z());
+      }
     }
 
     // Cover only cells short of a measured return, never beyond it.
@@ -163,6 +267,8 @@ private:
   }
 
   std::vector<bool> traced_;
+  std::vector<uint16_t> hit_count_;
+  std::vector<float> hit_z_;
 };
 
 }  // namespace odin_nav_sim

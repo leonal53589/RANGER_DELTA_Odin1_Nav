@@ -13,9 +13,20 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import PointCloud2
-from sensor_msgs_py.point_cloud2 import read_points
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
+
+
+_DTYPE_BY_DATATYPE = {
+    1: 'i1',
+    2: 'u1',
+    3: 'i2',
+    4: 'u2',
+    5: 'i4',
+    6: 'u4',
+    7: 'f4',
+    8: 'f8',
+}
 
 
 def stamp_seconds(stamp):
@@ -27,8 +38,31 @@ def cloud_xy(message, transform, low, high):
             or message.row_step != message.width * message.point_step
             or len(message.data) != message.row_step * message.height):
         raise ValueError('incomplete lidar cloud')
-    fields = read_points(message, field_names=('x', 'y', 'z'))
-    xyz = np.column_stack([fields[key] for key in ('x', 'y', 'z')])
+    fields = {f.name: f for f in message.fields if f.name in ('x', 'y', 'z')}
+    if len(fields) != 3:
+        raise ValueError('missing xyz fields')
+    endian = '>' if message.is_bigendian else '<'
+    names, formats, offsets = [], [], []
+    for name in ('x', 'y', 'z'):
+        field = fields[name]
+        code = _DTYPE_BY_DATATYPE.get(field.datatype)
+        if code is None or field.count != 1 or field.offset + np.dtype(code).itemsize > message.point_step:
+            raise ValueError(f'unsupported field {name}')
+        names.append(name)
+        formats.append(endian + code)
+        offsets.append(field.offset)
+    dtype = np.dtype({
+        'names': names,
+        'formats': formats,
+        'offsets': offsets,
+        'itemsize': message.point_step,
+    })
+    arr = np.frombuffer(message.data, dtype=dtype, count=message.width * message.height)
+    xyz = np.column_stack((
+        arr['x'].astype(np.float64, copy=False),
+        arr['y'].astype(np.float64, copy=False),
+        arr['z'].astype(np.float64, copy=False),
+    ))
     xyz = xyz[np.isfinite(xyz).all(axis=1) & (xyz != 0).any(axis=1)]
     if not len(xyz):
         raise ValueError('no valid lidar returns')
@@ -39,19 +73,42 @@ def cloud_xy(message, transform, low, high):
     return base[(base[:, 2] >= low) & (base[:, 2] <= high), :2]
 
 
-def occupied_sweep(points, vx, vy, wz, radius, margin, reaction, decel):
+def occupied_sweep(
+        points, vx, vy, wz, radius, margin, reaction, decel,
+        half_width=0.27, half_length=0.29):
+    if not len(points):
+        return False
     speed = math.hypot(vx, vy)
+    if speed <= 1e-5:
+        return np.count_nonzero(points[:, 0] ** 2 + points[:, 1] ** 2 <= radius * radius) >= 3
     distance = margin + speed * reaction + speed ** 2 / (2 * decel)
-    # Bound lateral travel during a turn by arc length times maximum heading change.
-    radius += distance * min(1.0, abs(wz) * (reaction + speed / decel)) if speed else 0.0
-    # Distance from each return to the segment swept by a circular footprint.
-    if speed > 1e-5:
-        dx, dy = vx / speed, vy / speed
-        along = np.clip(points[:, 0] * dx + points[:, 1] * dy, 0, distance)
-        x, y = points[:, 0] - along * dx, points[:, 1] - along * dy
-    else:
-        x, y = points[:, 0], points[:, 1]
-    return np.count_nonzero(x*x + y*y <= radius*radius) >= 3
+    limit = distance + radius + 0.05
+    pts = points[points[:, 0] ** 2 + points[:, 1] ** 2 <= limit * limit]
+    if len(pts) < 3:
+        return False
+    eff_w = min(half_width, radius)
+    eff_l = min(half_length, radius)
+    ux, uy = vx / speed, vy / speed
+    kappa = wz / speed
+    max_turn = 1.2
+    hit = np.zeros(len(pts), dtype=bool)
+    for step in range(7):
+        s = distance * (step / 6.0)
+        theta = max(-max_turn, min(max_turn, kappa * s))
+        half_turn = 0.5 * theta
+        chord = s * (1.0 if abs(half_turn) < 1e-6 else math.sin(half_turn) / half_turn)
+        ct_h, st_h = math.cos(half_turn), math.sin(half_turn)
+        rx = chord * (ux * ct_h - uy * st_h)
+        ry = chord * (ux * st_h + uy * ct_h)
+        ct, st = math.cos(theta), math.sin(theta)
+        dx = pts[:, 0] - rx
+        dy = pts[:, 1] - ry
+        bx = dx * ct + dy * st
+        by = -dx * st + dy * ct
+        hit |= (np.abs(bx) <= eff_l) & (np.abs(by) <= eff_w) & (bx * bx + by * by <= radius * radius)
+        if np.count_nonzero(hit) >= 3:
+            return True
+    return False
 
 
 class NavigationVelocityGuard(Node):
@@ -72,8 +129,10 @@ class NavigationVelocityGuard(Node):
         self.map_lead = self.declare_parameter('map_stamp_lead', 0.0).value
         if not math.isfinite(self.map_lead) or self.map_lead < 0:
             raise ValueError('invalid map TF timestamp lead')
-        self.radius = number('sweep_radius', 0.32)
-        self.margin = number('distance_margin', 0.04)
+        self.radius = number('sweep_radius', 0.305)
+        self.half_width = number('body_half_width', 0.27)
+        self.half_length = number('body_half_length', 0.29)
+        self.margin = number('distance_margin', 0.03)
         self.reaction = number('reaction_time', 0.35)
         self.decel = number('brake_deceleration', 0.5)
         self.low = number('min_height', 0.12)
@@ -159,7 +218,10 @@ class NavigationVelocityGuard(Node):
             return 'invalid velocity'
 
         def occupied(velocity):
-            return occupied_sweep(self.points, *velocity, self.radius, self.margin, self.reaction, self.decel)
+            return occupied_sweep(
+                self.points, *velocity, self.radius, self.margin, self.reaction, self.decel,
+                half_width=getattr(self, 'half_width', 0.27),
+                half_length=getattr(self, 'half_length', 0.29))
 
         # Keep the original braking envelope while a same-direction command slows.
         # Rotation or retreat can still use their own envelope once the wheels stop.

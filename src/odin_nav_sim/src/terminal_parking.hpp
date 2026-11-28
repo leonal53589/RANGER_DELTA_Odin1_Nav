@@ -31,7 +31,14 @@ public:
     settle_timeout_seconds_(settle_timeout_seconds)
   {}
 
+  bool isApproaching() const {return phase_ == Phase::Approach;}
   bool isRepositioning() const {return phase_ == Phase::Reposition;}
+
+  static double repositionToleranceFactor(double heading_error, double yaw_tolerance)
+  {
+    return std::abs(heading_error) < std::max(0.14, 2.0 * yaw_tolerance) ?
+      0.85 : kRepositionToleranceFactor;
+  }
 
   Command update(const Sample & sample)
   {
@@ -53,10 +60,12 @@ public:
       phase_ = Phase::Align;
     }
     if (phase_ == Phase::Reposition) {
-      // Reserve an inner margin only while a final turn is still needed. If both
-      // errors already pass, brake and verify the full stationary hold.
+      // Reserve an inner margin only while a turn is still needed; relax it for small
+      // residual yaw where spin-center drift is minimal, and brake immediately if both pass.
+      const double inner_factor =
+        repositionToleranceFactor(sample.heading_error, sample.yaw_tolerance);
       if (!(xy_ok && yaw_ok) &&
-        sample.distance > kRepositionToleranceFactor * sample.xy_tolerance)
+        sample.distance > inner_factor * sample.xy_tolerance)
       {
         return Command::Reposition;
       }

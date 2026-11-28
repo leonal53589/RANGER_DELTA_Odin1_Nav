@@ -77,8 +77,8 @@ controller_server:
         # Final yaw is handled by the chassis' spin mode during terminal parking.
         critics: [ConstraintCritic, CostCritic, GoalCritic, PathAlignCritic, PathFollowCritic, PathAngleCritic]
         CostCritic:
-          # The local costmap represents the chassis with robot_radius and inflation.
-          consider_footprint: false
+          # Check the actual oriented 54 cm / chamfered chassis footprint instead of a circle.
+          consider_footprint: true
         GoalCritic:
           cost_weight: 8.0
           threshold_to_consider: 0.85
@@ -112,8 +112,9 @@ global_costmap:
     ros__parameters:
       global_frame: map
       robot_base_frame: base_link
-      # The measured vehicle radius is at most 0.28 m. The margin is included here.
-      robot_radius: 0.30
+      # Physical chassis is ~0.52 m wide straight and ~0.30 m radius when spinning;
+      # keep a 54 cm straight / 30.7 cm spin-circumradius chamfered footprint.
+      footprint: '[[0.29, 0.10], [0.14, 0.27], [-0.14, 0.27], [-0.29, 0.10], [-0.29, -0.10], [-0.14, -0.27], [0.14, -0.27], [0.29, -0.10]]'
       footprint_padding: 0.0
       resolution: 0.05
       track_unknown_space: true
@@ -155,7 +156,7 @@ global_costmap:
           raytrace_max_range: 4.5
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        inflation_radius: 0.55
+        inflation_radius: 0.45
         cost_scaling_factor: 3.5
 
 local_costmap:
@@ -163,7 +164,7 @@ local_costmap:
     ros__parameters:
       global_frame: odom
       robot_base_frame: base_link
-      robot_radius: 0.30
+      footprint: '[[0.29, 0.10], [0.14, 0.27], [-0.14, 0.27], [-0.29, 0.10], [-0.29, -0.10], [-0.14, -0.27], [0.14, -0.27], [0.29, -0.10]]'
       footprint_padding: 0.0
       rolling_window: true
       width: 4
@@ -204,7 +205,7 @@ local_costmap:
           raytrace_max_range: 4.5
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        inflation_radius: 0.50
+        inflation_radius: 0.45
         cost_scaling_factor: 3.5
 
 behavior_server:
@@ -233,12 +234,14 @@ ranger_delta_command:
 
 navigation_velocity_guard:
   ros__parameters:
-    cloud_timeout: 0.30
+    cloud_timeout: 0.45
     odom_timeout: 0.20
     map_timeout: 0.50
     command_timeout: 0.20
-    sweep_radius: 0.32
-    distance_margin: 0.04
+    sweep_radius: 0.305
+    body_half_width: 0.27
+    body_half_length: 0.29
+    distance_margin: 0.03
     reaction_time: 0.35
     brake_deceleration: 0.5
     min_height: 0.12
