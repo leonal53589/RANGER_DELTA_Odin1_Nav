@@ -38,8 +38,11 @@ def launch_setup(context):
     launch_rviz = LaunchConfiguration('launch_rviz').perform(context) == 'true'
     publish_map_odom_tf = LaunchConfiguration('publish_map_odom_tf').perform(context) == 'true'
     map_yaml_file = LaunchConfiguration('map').perform(context)
+    localization_mode = LaunchConfiguration('localization_mode').perform(context)
+    vgicp_reference_pcd = LaunchConfiguration('vgicp_reference_pcd').perform(context)
+    vgicp_localization_yaml = LaunchConfiguration('vgicp_localization_yaml').perform(context)
     odin_relocalization_config = LaunchConfiguration('odin_relocalization_config').perform(context)
-    tf_stamp_lead = 0.30 if odin_relocalization_config else 0.0
+    tf_stamp_lead = 0.30 if (odin_relocalization_config or localization_mode == 'vgicp') else 0.0
     odin_reference_pcd = LaunchConfiguration('odin_reference_pcd').perform(context)
     odin_spin_guard = LaunchConfiguration('odin_spin_guard')
     goal_time_ab = LaunchConfiguration('goal_time_ab').perform(context) == 'true'
@@ -53,10 +56,14 @@ def launch_setup(context):
             raise ValueError('goal_time_ab requires the precision profile and ODIN1 relocalization')
     if enable_control and publish_map_odom_tf:
         raise ValueError('Static map alignment is available only with enable_control:=false')
-    if odin_relocalization_config and publish_map_odom_tf:
-        raise ValueError('Odin relocalization and static alignment both publish map -> odom')
-    if odin_reference_pcd and (not odin_relocalization_config or not Path(odin_reference_pcd).is_file()):
-        raise ValueError('odin_reference_pcd requires a saved PCD and ODIN1 relocalization')
+    if (odin_relocalization_config or localization_mode == 'vgicp') and publish_map_odom_tf:
+        raise ValueError('Active localization and static alignment both publish map -> odom')
+    if localization_mode == 'vgicp' and not Path(vgicp_reference_pcd).is_file():
+        raise ValueError(f'vgicp_reference_pcd is missing: {vgicp_reference_pcd}')
+    if vgicp_localization_yaml and not Path(vgicp_localization_yaml).is_file():
+        raise ValueError(f'vgicp_localization_yaml is missing: {vgicp_localization_yaml}')
+    if odin_reference_pcd and (localization_mode != 'odin' or not odin_relocalization_config or not Path(odin_reference_pcd).is_file()):
+        raise ValueError('odin_reference_pcd requires a saved PCD and ODIN1 odin-mode relocalization')
     if odin_spin_guard.perform(context) == 'true' and not odin_relocalization_config:
         raise ValueError('odin_spin_guard requires ODIN1 relocalization')
     if enable_control and not all(
@@ -116,13 +123,21 @@ def launch_setup(context):
             function=remove_test_params,
         )])))
     if goal_profile == 'precision':
+        rewrites = {
+            'planner_server.ros__parameters.GridBased.tolerance': '0.035',
+            'controller_server.ros__parameters.goal_checker.xy_goal_tolerance':
+                '0.022' if localization_mode == 'vgicp' else '0.06',
+            'controller_server.ros__parameters.goal_checker.yaw_goal_tolerance':
+                '0.05' if localization_mode == 'vgicp' else '0.10',
+        }
+        if localization_mode == 'vgicp':
+            rewrites.update({
+                'controller_server.ros__parameters.FollowPath.terminal_settle_hold_time': '0.55',
+                'controller_server.ros__parameters.FollowPath.terminal_settle_timeout': '4.0',
+            })
         nav2_params = RewrittenYaml(
             source_file=nav2_params,
-            param_rewrites={
-                'planner_server.ros__parameters.GridBased.tolerance': '0.035',
-                'controller_server.ros__parameters.goal_checker.xy_goal_tolerance': '0.06',
-                'controller_server.ros__parameters.goal_checker.yaw_goal_tolerance': '0.10',
-            },
+            param_rewrites=rewrites,
             convert_types=True,
         )
     rviz_config = PathJoinSubstitution([pkg_nav, 'rviz', 'real_navigation.rviz'])
@@ -220,7 +235,41 @@ def launch_setup(context):
                           arguments=['watch', parking_reference], output='screen'))
 
     # Only one source may publish the global map -> odom transform.
-    if odin_relocalization_config:
+    if localization_mode == 'vgicp':
+        vgicp_params = {
+            'reference_pcd': vgicp_reference_pcd,
+            'tf_stamp_lead': tf_stamp_lead,
+            'use_odin_seed': bool(odin_relocalization_config),
+            'odin_map_x': ParameterValue(LaunchConfiguration('odin_map_x'), value_type=float),
+            'odin_map_y': ParameterValue(LaunchConfiguration('odin_map_y'), value_type=float),
+            'odin_map_yaw': ParameterValue(LaunchConfiguration('odin_map_yaw'), value_type=float),
+        }
+        if vgicp_localization_yaml:
+            loc_cfg = yaml.safe_load(Path(vgicp_localization_yaml).read_text(encoding='utf-8')) or {}
+            align = loc_cfg.get('old_map_to_glim_xy_yaw')
+            if align and len(align) == 3:
+                vgicp_params['odin_map_x'] = float(align[0])
+                vgicp_params['odin_map_y'] = float(align[1])
+                vgicp_params['odin_map_yaw'] = float(align[2])
+            m_xyz = loc_cfg.get('mount_xyz')
+            m_rpy = loc_cfg.get('mount_rpy')
+            if m_xyz and len(m_xyz) == 3:
+                vgicp_params['mount_x'] = float(m_xyz[0])
+                vgicp_params['mount_y'] = float(m_xyz[1])
+                vgicp_params['mount_z'] = float(m_xyz[2])
+            if m_rpy and len(m_rpy) == 3:
+                vgicp_params['mount_roll'] = float(m_rpy[0])
+                vgicp_params['mount_pitch'] = float(m_rpy[1])
+                vgicp_params['mount_yaw'] = float(m_rpy[2])
+        nodes.append(Node(
+            package='odin_nav_sim',
+            executable='vgicp_localization',
+            name='vgicp_localization',
+            output='screen',
+            parameters=[vgicp_params],
+            additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '2'},
+        ))
+    elif odin_relocalization_config:
         nodes.append(Node(
             package='odin_nav_sim',
             executable='odin_localization',
@@ -280,6 +329,9 @@ def generate_launch_description():
                               description='精确停车实验中按目标选择原始或时间对齐判定'),
         DeclareLaunchArgument('enable_control', default_value='false', choices=['true', 'false'], description='是否允许向底盘下发控制指令'),
         DeclareLaunchArgument('publish_map_odom_tf', default_value='false', choices=['true', 'false'], description='只读联调时发布静态 map → odom'),
+        DeclareLaunchArgument('localization_mode', default_value='odin', choices=['odin', 'vgicp'], description='全局定位方式：ODIN 重定位或 GLIM 常驻 4-DoF VGICP'),
+        DeclareLaunchArgument('vgicp_reference_pcd', default_value='', description='VGICP 定位使用的参考 3D 点云 .pcd 路径'),
+        DeclareLaunchArgument('vgicp_localization_yaml', default_value='', description='VGICP 地图对齐与安装外参 YAML 路径'),
         DeclareLaunchArgument('odin_relocalization_config', default_value='', description='ODIN1 重定位配置 YAML 路径'),
         DeclareLaunchArgument('odin_reference_pcd', default_value='', description='用于复核地图校正的同次采图二进制 PCD'),
         DeclareLaunchArgument('odin_spin_guard', default_value='false', choices=['true', 'false'],

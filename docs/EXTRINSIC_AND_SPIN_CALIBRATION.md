@@ -1,7 +1,8 @@
 # Ranger Delta 旋转中心与 ODIN1 6-DoF 外参实车标定记录
 
 **实测日期**：2026-11-26  
-**原始数据包与求解结果**：[`log/calib_20261126_165306_n26ilO/`](../log/calib_20261126_165306_n26ilO/) · [`calibration_result.json`](../log/calib_20261126_165306_n26ilO/calibration_result.json)  
+**本机归档** `local_experiments/field_archive/calib_20261126_165306_n26ilO/`，含原始录包与 `calibration_result.json`。
+
 **采集与求解脚本**：[`calib_runner.py`](../scripts/calib/calib_runner.py) · [`solve_calibration.py`](../scripts/calib/solve_calibration.py)
 
 ---
@@ -129,5 +130,7 @@ OPENBLAS_NUM_THREADS=1 python3 scripts/calib/solve_calibration.py --calib-dir "$
      sensor_pitch=0.01325
      sensor_yaw=-0.02631
      ```
-   - 启动脚本已使用这组外参，`station_reference` 默认留空。更改外参会改变点云到 `base_link` 的投影和工位地图目标。用当前地图和外参重新采集参考帧后，再启用工位闭环。[采集步骤](../README.md#工位-a-精确返航)
+   - 启动脚本已使用这组外参，`station_reference` 默认留空。更改外参会改变点云到 `base_link` 的投影和工位地图目标。用当前地图和外参重新采集参考帧后，再启用工位闭环。[采集步骤](NAVIGATION_GUIDE.md#工位-a-精确返航)
 2. **全场建图进展。** 已用点云和原生 IMU 离线运行 GLIM，并以物理地面整平。新图与独立停车扫描的结果见[全场定位验收](TEST_RESULTS.md#glim-validation)。
+
+全场 VGICP 入口另从地图配置读取匹配器外参。重新标定时同步核对启动脚本传给车体 TF 的六个值与地图配置中的 `mount_xyz`、`mount_rpy`。[GLIM 入口](../scripts/run_glim_navigation.sh) · [匹配器外参](../maps/glim_20261127/localization.yaml)

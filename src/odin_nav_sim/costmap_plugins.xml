@@ -1,0 +1,5 @@
+<library path="decaying_voxel_layer">
+  <class type="odin_nav_sim::DecayingVoxelLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>VoxelLayer that expires un-refreshed upper-voxel dynamic obstacles after obstacle_persistence seconds.</description>
+  </class>
+</library>

@@ -1,12 +1,16 @@
-### 二、留形雷达的配置体系与驱动方法
+# ODIN1 设备采图源码笔记
+
+本文记录设备驱动、SLAM 点云拼接和 Qt 保存流程。全场运行时的 VGICP 定位见[导航代码原理](NAVIGATION_MATHEMATICS_AND_PRINCIPLES.md#glim-runtime)。
+
+## 设备配置与驱动
 
 #### 1. 留形雷达的驱动本质
 留形（Odin1）不同于传统雷达只发原始点云。**它是一台计算前置的设备**：
 * 传感器硬件内部内置了计算单元，在端侧运行紧耦合激光/视觉/惯导 LIO。
 * 主机（电脑）通过 USB 3.0 发送控制指令；传感器向主机回传解算完毕的 **400Hz 高频里程计（`/odin1/odometry_highfreq`）** 和 **已对齐到全局坐标系（`odom`）的稠密 SLAM 点云（`/odin1/cloud_slam`）**。
 
-#### 2. 核心配置文件：[`config/control_command.yaml`](file:///home/leona/WorkingSpace/navigation2/project_slam/src/odin_ros_driver/config/control_command.yaml)
-驱动启动时由 [`YamlParser`](file:///home/leona/WorkingSpace/navigation2/project_slam/src/odin_ros_driver/src/yaml_parser.cpp) 解析该文件：
+#### 2. 核心配置文件：[`config/control_command.yaml`](../src/odin_ros_driver/config/control_command.yaml)
+驱动启动时由 [`YamlParser`](../src/odin_ros_driver/src/yaml_parser.cpp) 解析该文件：
 * `strict_usb3.0_check: 1`：强制要求 USB 3.0 连接，避免 USB 2.0 带宽不足丢帧。
 * `use_host_ros_time: 2`：将传感器内部时间轴与主机 ROS 时间精密对齐。
 * `sendcloudslam: 1` / `sendodom: 1` / `sendimu: 1`：保留导航与建图必需的 3 个核心流。
@@ -14,9 +18,9 @@
 
 ---
 
-### 三、核心代码逐句分析
+## 驱动、点云与界面
 
-#### 模块 1：驱动生命周期与数据分发 —— [`host_sdk_sample.cpp`](file:///home/leona/WorkingSpace/navigation2/project_slam/src/odin_ros_driver/src/host_sdk_sample.cpp)
+#### 模块 1：驱动生命周期与数据分发 —— [`host_sdk_sample.cpp`](../src/odin_ros_driver/src/host_sdk_sample.cpp)
 
 留形官方 SDK 为 C 接口（`lidar_api.h`），驱动通过状态机和回调方式与底层硬件交互。
 
@@ -148,7 +152,7 @@ static void lidar_data_callback(const lidar_data_t *data, void *user_data) {
 
 ---
 
-#### 模块 2：轻量建图与拼接 —— [`odin_slam_node.cpp`](file:///home/leona/WorkingSpace/navigation2/project_slam/src/odin_slam/src/odin_slam_node.cpp)
+#### 模块 2：轻量建图与拼接 —— [`odin_slam_node.cpp`](../src/odin_slam/src/odin_slam_node.cpp)
 
 建图节点负责订阅留形模组发布的已对齐点云，完成累加拼图、降采样与落盘保存。
 
@@ -266,7 +270,7 @@ void OdinSlamNode::save_result() {
 
 ---
 
-#### 模块 3：Qt 界面与 ROS 2 多线程交互 —— [`ros_worker.cpp`](file:///home/leona/WorkingSpace/navigation2/project_slam/src/odin_slam/src/ros_worker.cpp)
+#### 模块 3：Qt 界面与 ROS 2 多线程交互 —— [`ros_worker.cpp`](../src/odin_slam/src/ros_worker.cpp)
 
 很多 ROS 2 初学者在写 GUI 节点时容易把 `rclcpp::spin()` 放在主线程，导致界面卡死。
 这里的写法非常标准：
@@ -292,7 +296,7 @@ void RosWorker::run() {
 
 ---
 
-### 四、总结与后续步骤
+## 采图流程小结
 
 1. **核心驱动链**：`USB 3.0 -> lydHostApi 固件通信 -> control_command.yaml 裁剪 -> host_sdk_sample -> 发布 /odin1/cloud_slam & /odin1/odometry_highfreq`。
 2. **建图链**：`Qt 界面按键 -> 触发 OdinSlamNode 累加 -> PCL 降采样与去噪 -> 导出 project_slam/maps/0.pcd`。

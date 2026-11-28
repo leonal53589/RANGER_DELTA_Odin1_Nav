@@ -91,6 +91,19 @@ bool similarRoute(const Path & a, const Path & b, const Pose & robot, double tol
   return true;
 }
 
+double remainingPathLength(const Path & path, const Pose & robot)
+{
+  if (path.poses.size() < 2) {
+    return path.poses.empty() ? 0.0 : separation(path.poses.front(), robot);
+  }
+  auto it = nearestPoint(path, robot);
+  double length = 0.0;
+  for (; it + 1 != path.poses.end(); ++it) {
+    length += separation(*it, *(it + 1));
+  }
+  return length;
+}
+
 // Only bridge a remote blockage on a verified near stretch. A sparse or
 // ambiguous plan must not skip the section actually under the chassis.
 Path nearPrefix(const Path & path, const Pose & robot)
@@ -163,7 +176,14 @@ public:
     tracking_failures_ = 0;
     retry_after_ = {};
     anchor_.reset();
+    terminal_best_dist_.reset();
     next_check_ = {};
+    detoured_ = false;
+    shortcut_checking_ = false;
+    pending_shortcut_.poses.clear();
+    next_shortcut_check_ = {};
+    shortcut_switch_after_ = {};
+    shortcut_switches_ = 0;
     last_failure_ = Failure::Planning;
     BT::ControlNode::halt();
   }
@@ -179,6 +199,10 @@ private:
     plan_started_.reset();
     haltChild(2);
     handover_deadline_.reset();
+    detoured_ = true;
+    shortcut_checking_ = false;
+    pending_shortcut_.poses.clear();
+    next_shortcut_check_ = now + std::chrono::seconds(2);
     if (!blocked_) {
       blocked_ = now;
       alignment_credit_ = 0.0;
@@ -205,6 +229,7 @@ private:
     }
     active_.poses.clear();
     anchor_.reset();
+    terminal_best_dist_.reset();
     pending_route_.poses.clear();
   }
 
@@ -214,8 +239,11 @@ private:
     if (!nav2_util::getCurrentPose(odom, *tf_, "odom", "base_link", 0.0)) {
       return false;
     }
+    const double goal_distance = separation(map_pose, active_.poses.back());
+    const bool near_terminal = goal_distance <= 0.25;
     if (!anchor_) {
       anchor_ = odom.pose.position;
+      terminal_best_dist_ = near_terminal ? std::optional<double>(goal_distance) : std::nullopt;
       progress_heading_ = heading - tf2::getYaw(map_pose.pose.orientation) +
         tf2::getYaw(odom.pose.orientation);
       // Near the endpoint the controller turns to the requested final orientation.
@@ -227,6 +255,10 @@ private:
       initial_yaw_error_ = std::abs(std::remainder(
         alignment_heading_ - tf2::getYaw(odom.pose.orientation), 2.0 * M_PI));
       tracking_since_ = now;
+    } else if (near_terminal && !terminal_best_dist_) {
+      terminal_best_dist_ = goal_distance;
+    } else if (!near_terminal) {
+      terminal_best_dist_.reset();
     }
     // Count only a new best reduction towards this departure heading in wheel
     // coordinates. Oscillation and repeated short plans cannot accumulate credit.
@@ -238,7 +270,12 @@ private:
     const auto & p = odom.pose.position;
     const double advance = (p.x - anchor_->x) * std::cos(progress_heading_) +
       (p.y - anchor_->y) * std::sin(progress_heading_);
-    if (advance >= (blocked_ ? 0.12 : 0.08) &&
+    const bool linear_progress = advance >= (blocked_ ? 0.12 : 0.08);
+    // Inside the terminal parking envelope, remaining distance is often below 0.12 m;
+    // any meaningful reduction toward the endpoint proves active progress.
+    const bool terminal_progress = near_terminal && terminal_best_dist_ &&
+      (goal_distance <= *terminal_best_dist_ - 0.015 || advance >= 0.06);
+    if ((linear_progress || terminal_progress) &&
       now - tracking_since_ >= std::chrono::milliseconds(800))
     {
       if (blocked_) {
@@ -249,10 +286,12 @@ private:
       alignment_credit_ = 0.0;
       blocked_.reset();
       anchor_.reset();
+      terminal_best_dist_ = near_terminal ? std::optional<double>(goal_distance) : std::nullopt;
       return false;
     }
     // A turn can earn at most pi / 0.30 s once. Rocking cannot keep extending the window.
-    return std::chrono::duration<double>(now - tracking_since_).count() >= 12.0 + alignment_credit_;
+    const double stall_window = (near_terminal ? 18.0 : 12.0) + alignment_credit_;
+    return std::chrono::duration<double>(now - tracking_since_).count() >= stall_window;
   }
 
   bool validatePath(const Path & path)
@@ -270,6 +309,11 @@ private:
   {
     if (!validatePath(nearPrefix(active_, robot))) {
       return false;
+    }
+    if (shortcut_checking_) {
+      haltChild(0);
+      shortcut_checking_ = false;
+      pending_shortcut_.poses.clear();
     }
     handover_deadline_ = Clock::now() + std::chrono::milliseconds(250);
     return true;
@@ -295,13 +339,88 @@ private:
           active_ = path.value();
           setOutput("path", active_);
           handover_deadline_.reset();
-          next_check_ = Clock::now() + period;
+          detoured_ = true;
+          pending_shortcut_.poses.clear();
+          const auto now = Clock::now();
+          next_check_ = now + period;
+          shortcut_switch_after_ = now + std::chrono::seconds(4);
+          next_shortcut_check_ = shortcut_switch_after_;
           RCLCPP_INFO(node_->get_logger(), "Remote obstruction: switched to a same-direction route");
           return;
         }
       }
     }
     stopTracking(Clock::now());
+  }
+
+  void tryShortcutRecovery(Clock::time_point now, const Pose & robot)
+  {
+    if (!detoured_ || shortcut_switches_ >= 3 ||
+      separation(robot, active_.poses.back()) <= 0.60 || now < shortcut_switch_after_)
+    {
+      if (shortcut_checking_) {
+        haltChild(0);
+        shortcut_checking_ = false;
+      }
+      pending_shortcut_.poses.clear();
+      return;
+    }
+    if (!shortcut_checking_ && now < next_shortcut_check_) {
+      return;
+    }
+    shortcut_checking_ = true;
+    const auto plan = children_nodes_[0]->executeTick();
+    if (plan == Status::RUNNING) {
+      return;
+    }
+    shortcut_checking_ = false;
+    haltChild(0);
+    next_shortcut_check_ = now + std::chrono::milliseconds(1000);
+
+    const auto candidate = getInput<Path>("candidate");
+    if (plan != Status::SUCCESS || !candidate || candidate.value().poses.empty() ||
+      candidate.value().header.frame_id != active_.header.frame_id)
+    {
+      pending_shortcut_.poses.clear();
+      return;
+    }
+    const auto & cand = candidate.value();
+    const double active_len = remainingPathLength(active_, robot);
+    const double cand_len = remainingPathLength(cand, robot);
+    const double min_saving = std::max(0.35, 0.08 * active_len);
+    const double cand_departure = departure(cand, robot);
+    const double robot_turn = std::abs(std::remainder(
+      cand_departure - tf2::getYaw(robot.pose.orientation), 2.0 * M_PI));
+    const bool recently_rejected =
+      now < retry_after_ && similarRoute(previous_route_, cand, robot, 0.15);
+    if (active_len - cand_len < min_saving || robot_turn > M_PI / 3 ||
+      recently_rejected || !validatePath(cand))
+    {
+      pending_shortcut_.poses.clear();
+      return;
+    }
+
+    // Require two consistent plans at least 1.0 s apart (two global costmap updates)
+    // before switching back, preventing boundary-cost oscillation.
+    if (pending_shortcut_.poses.empty() ||
+      !similarRoute(pending_shortcut_, cand, robot, 0.25) ||
+      std::abs(std::remainder(cand_departure - departure(pending_shortcut_, robot), 2.0 * M_PI)) > M_PI / 6)
+    {
+      pending_shortcut_ = cand;
+      return;
+    }
+
+    active_ = cand;
+    setOutput("path", active_);
+    pending_shortcut_.poses.clear();
+    anchor_.reset();
+    terminal_best_dist_.reset();
+    ++shortcut_switches_;
+    shortcut_switch_after_ = now + std::chrono::seconds(4);
+    next_shortcut_check_ = shortcut_switch_after_;
+    RCLCPP_INFO(
+      node_->get_logger(), "Obstruction cleared: restoring shorter route (saved %.2f m)",
+      active_len - cand_len);
   }
 
   Status tick() override
@@ -351,6 +470,8 @@ private:
         } else {
           stopTracking(now);
         }
+      } else if (!active_.poses.empty() && have_pose) {
+        tryShortcutRecovery(now, robot);
       }
       if (!active_.poses.empty()) {
         const auto track = children_nodes_[2]->executeTick();
@@ -442,6 +563,10 @@ private:
     active_ = path;
     setOutput("path", active_);
     next_check_ = now + period;
+    pending_shortcut_.poses.clear();
+    if (detoured_) {
+      next_shortcut_check_ = now + std::chrono::seconds(2);
+    }
     return Status::RUNNING;
   }
 
@@ -453,11 +578,15 @@ private:
   double initial_yaw_error_{0.0}, alignment_credit_{0.0};
   Clock::time_point next_check_{}, tracking_since_{};
   std::optional<double> previous_heading_;
-  Path previous_route_, pending_route_;
+  Path previous_route_, pending_route_, pending_shortcut_;
+  bool detoured_{false}, shortcut_checking_{false};
+  unsigned int shortcut_switches_{0};
+  Clock::time_point next_shortcut_check_{}, shortcut_switch_after_{};
   unsigned int tracking_failures_{0};
   Clock::time_point retry_after_{};
   double alignment_heading_{0.0};
   std::optional<geometry_msgs::msg::Point> anchor_;
+  std::optional<double> terminal_best_dist_;
   double progress_heading_{0.0}, yield_{2.0}, timeout_{20.0};
   Failure last_failure_{Failure::Planning};
 };

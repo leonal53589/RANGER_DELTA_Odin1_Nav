@@ -1,6 +1,47 @@
 # `project_slam` 导航系统数学与算法原理解析
 
-本文面向具有**高等数学、线性代数、概率论**基础但尚未系统接触移动机器人导航算法开发的读者，对照 `project_slam` 的真实代码实现，完整推导本系统从传感器标定、点云配准定位、全局/局部轨迹规划、到全向底盘控制与末端精密泊车的每一条核心公式，不省略关键推导步骤。
+<a id="glim-runtime"></a>
+## 全场导航的在线执行路径
+
+一次 RViz 目标包含地图坐标下的目标位置和朝向。GLIM 在采图后离线生成三维参考，运行时由 VGICP 将实时扫描与参考配准。Nav2 使用同一地图坐标系下的二维栅格规划，实际车速经点云保护后送到底盘。
+
+```text
+ODIN 设备位姿 ──初始估计或恢复──┐
+实时点云 + 扫描期间的轮式运动 ──┼→ VGICP 对齐 GLIM 参考 PCD → map → odom
+底盘 CAN 反馈 ─────────────────────────────────────────────→ odom → base_link
+静态栅格 + 实时障碍 → 全局代价地图 → SmacPlanner2D → 候选路径 → 行为树选路
+局部代价地图 + 已接受路径 → MPPI 行驶跟踪 → 末端转向、补位和停稳判定
+/cmd_vel_nav → 速度平滑 → /cmd_vel → 近障与时效保护 → /cmd_vel_guarded → CAN
+```
+
+### 一帧点云怎样更新地图位置
+
+1. **对准时间和车体原点。** 原始点时刻为帧头加 `offset_time`（秒）。移动时，节点用轮式里程计在扫描期间插值得到相对运动，结合 `base_link → lidar` 的六维外参，把各点变换到帧头时刻。运动样本不足时跳过去畸变。地面拟合用于整平，高度筛选后进入匹配。[输入与时间处理](../src/odin_nav_sim/src/vgicp_localization_node.cpp) · [去畸变及地面拟合](../src/odin_nav_sim/src/vgicp_4dof_matcher.hpp)
+2. **解四个量。** 优化变量是平移 $(x,y,z)$ 和偏航角 $\psi$。对点与地图体素的残差 $r$，按局部协方差给方向加权，基本代价为 $r^T W r$。先在 0.16 m 体素图粗配，再在 0.10 m 图精配。加载静态地图时预先索引每个查询格周围 27 格中的非空体素。每次迭代按原顺序比较这些体素的均值，保留等距时的选择顺序。弱特征方向向预测初值加约束，减少长直墙沿墙方向的漂移。两级体素尺寸决定匹配邻域，不等于输出位置分辨率。[配准实现](../src/odin_nav_sim/src/vgicp_4dof_matcher.hpp)
+3. **决定是否接受。** 对三个偏航初值分别求解。默认偏移 ±6°，锁定且行驶时收窄到 ±2.5°。检查收敛、解间分歧、重叠率、内点、几何约束和相对预测的修正量。例如多解分离超过 2.5 cm 或 2° 会得到 `ambiguous_fit`，即使很多点都落在同一面墙上。[质量门槛与拒绝原因](../src/odin_nav_sim/src/vgicp_4dof_matcher.hpp)
+4. **发布 Nav2 的 TF。** 记 $T^A_B$ 为从 B 到 A 的变换。用接受的雷达位姿和外参求底盘位姿，在同一时刻计算 $T^{map}_{odom}=T^{map}_{base}(T^{odom}_{base})^{-1}$。行驶时平滑并限幅校正；停稳时采用通过检查的匹配解。两次校正之间由轮式里程计传播。连续缺少有效校正超过 4 s 且本帧遭拒时，可用 ODIN 种子重新配准。行驶中恢复解需要与轮式预测一致，并限幅写入。默认自最后一次有效校正起，累计用时 8 s、平移行程 0.80 m 或转角 0.50 rad 达到任一上限时停止轮式衔接。轮式反馈超过 0.5 s 未更新也会暂停发布。质量判断读 `/vgicp_localization/status`，接受后的融合位姿读 `/vgicp_localization/pose`。[定位节点](../src/odin_nav_sim/src/vgicp_localization_node.cpp) · [地图间对齐与外参](../maps/glim_20261127/localization.yaml)
+
+停车单帧出现多解时，定位节点按时序汇集 12 帧。前 6 帧搜索候选，后 6 帧验证。轮式位置变化超过 8 mm、航向变化超过 0.01 rad、相邻扫描间隔超过 0.25 s 或初值跳变时清空窗口。恢复分支默认选取整平后高度至少 0.70 m 的点，并按 1 m 水平格等权比较残差。领先候选需在至少 6 个区域胜过其他候选，移掉优势最大的一格后仍领先，且沿歧义方向平移或转向扰动后误差增加。通过重合率、几何约束和初值范围检查后，正式输出 `stationary_recovery` 并更新地图 TF。避障从完整点云独立计算。 [实车复测与回放](TEST_RESULTS.md#vgicp-stationary-recovery)
+
+### 遇到临时障碍时谁做决定
+
+全局图在 `map` 系叠加静态层、动态体素层与膨胀层。局部图在 `odom` 系随车滚动。射线清除和动态层过期都能消除障碍残影。当前全局和局部过期时间分别为 3.5 s、3.0 s，作用于本层的致命格；静态图中的障碍仍由静态层提供。障碍是否仍占据现场，还取决于雷达视野与遮挡。[代价图配置](../src/odin_nav_sim/config/nav2_real.yaml) · [动态体素层](../src/odin_nav_sim/src/decaying_voxel_layer.cpp)
+
+行为树检查候选路径、当前路径和近段可通行性。绕行时，在距路径末点超过 0.60 m 的区间，行为树会在跟踪当前路线的同时查询捷径。连续两次候选一致、通过有效性检查且节省至少 0.35 m 和剩余路长的 8% 时，结合出发方向和冷却条件决定是否切换。单点树给短时阻挡预留 2 s 等待，阻塞持续且没有稳定可行路线时以 20 s 为退出门限。跟踪过程中，MPPI 在局部代价图上评估 Ackermann 轨迹；末级速度保护独立检查新鲜度和近障。实测分析时分别看候选路径、实际跟踪路径和受保护速度。[单点行为树](../src/odin_nav_sim/behavior_trees/navigate_with_obstacle_wait.xml) · [选路与进展判定](../src/odin_nav_sim/src/obstacle_navigation.cpp) · [速度保护](../src/odin_nav_sim/scripts/navigation_velocity_guard.py)
+
+### 最后几厘米怎样补位、怎样报到
+
+控制器记录已接受路径的末点 $p_e$。每次计算时，将末点与估计底盘位置 $\hat p$ 变换到同一坐标系、同一位姿时间，得到车体系下的纵横向误差 $[d_x,d_y]^T=R(-\hat\psi)(p_e-\hat p)$。MPPI 跟踪时，连续限速取 $0.035 + 0.55\max(0, d-\epsilon_{xy})$ m/s 与现有速度上限的较小值，其中 $d$ 是到真实路径末点的估计距离。当末点本身已成为前视点且距离小于 0.30 m，控制器根据到位圆盘在车前张开的角度决定是否需要切换原地转向。进入位置容差后对准最终航向。若停稳后仍偏离，控制器按误差方向和可见净空选前后直移或左右蟹行，横移上限 0.035 m/s。无法确认直移净空时退回路径跟踪。[控制器](../src/odin_nav_sim/src/delta_pursuit_controller.cpp) · [扫掠空间检查](../src/odin_nav_sim/src/terminal_clearance.hpp)
+
+GLIM 的 `precision` 配置将位置容差设为 0.022 m、航向容差设为 0.05 rad。轮速满足停车条件，位姿时间戳持续更新，且误差在范围内连续保持 0.55 s，控制器才能报到。当前判定没有单独要求停车后收到新的有效 VGICP 帧。对同一地图坐标系内的原目标 $p_g$ 和真实位置 $p$，误差可分解为
+
+$$
+p-p_g=(p-\hat p)+(\hat p-p_e)+(p_e-p_g).
+$$
+
+三项依次为定位误差、控制器跟踪末点的误差、路径末点与原目标的偏移。第二项由控制器直接检查。验收实体 3 cm / 5° 时，还要测第一项并记录第三项。[精停参数覆盖](../src/odin_nav_sim/launch/real_navigation.launch.py) · [停稳状态机](../src/odin_nav_sim/src/terminal_parking.hpp) · [实车观测](TEST_RESULTS.md#glim-navigation)
+
+下文保留坐标变换、标定、设备定位、工位点云及底盘控制的详细推导。第 3 章的点到平面 ICP 和第 5 章的双墙伺服分别用于工位观测或历史实验；全场在线匹配与普通目标精停使用本节所列实现。
 
 ---
 
@@ -268,7 +309,7 @@ $$J_i = n_i^T \frac{\partial q_i}{\partial \xi} = \begin{bmatrix} n_{ix} & n_{iy
 
 > **为什么此前 `1.pcd` 离线回放出现大量拒绝？（结合实验二分析）**：
 > 1. 历史 ODIN 导出的 `1.pcd` 在高度 $z = 2.00\text{ m}$ 处被截顶，导致实车 31% 的高层观测点在先验图中完全无对应；
-> 2. 即使裁剪高度后，因旧图未去畸变/多趟配准误差，墙面厚度较大（部分墙面不满足平面性判据 $\lambda_0 < 0.20\lambda_1$），使得 `PriorMapMatcher` 在建树时将 68% 的墙面区域筛除，造成 `structural_overlap` 仅 `0.318 < 0.50` 而拒收。这从数学上解释了为何下一步需要构建薄壁精准静态图并引入基于信息矩阵的 4-DoF VGICP/GICP。
+> 2. 即使裁剪高度后，因旧图未去畸变/多趟配准误差，墙面厚度较大（部分墙面不满足平面性判据 $\lambda_0 < 0.20\lambda_1$），使得 `PriorMapMatcher` 在建树时将 68% 的墙面区域筛除，造成 `structural_overlap` 仅 `0.318 < 0.50` 而拒收。后续 GLIM 地图及 VGICP 的实测对照见[全场地图验证](TEST_RESULTS.md#glim-validation)。
 
 ---
 
@@ -298,9 +339,9 @@ $$J_i = n_i^T \frac{\partial q_i}{\partial \xi} = \begin{bmatrix} n_{ix} & n_{iy
 [`nav2_real.yaml`](../src/odin_nav_sim/config/nav2_real.yaml#L31-L156) 采用分辨率 $5\text{ cm}$ 的二维栅格地图。关键数学逻辑在于**代价膨胀层（Inflation Layer）**：
 - 实测底盘外接圆半径不超过 $0.28\text{ m}$，配置中取安全圆半径 $r_{\text{robot}} = 0.30\text{ m}$，膨胀半径 $r_{\text{inf}} = 0.55\text{ m}$（局部 $0.50\text{ m}$）。
 - 任一栅格中心到最近障碍物（体素层投影在身高 $0.12\text{ m} \sim 1.35\text{ m}$ 内标记）的欧氏距离记作 $d$：
-  - 若 $d \le r_{\text{robot}}$：赋予**致命代价 254 (Lethal)**，圆心禁止落入；
+  - 障碍格中心 $d=0$ 的代价为 254，$0<d\le r_{\text{robot}}$ 的内切膨胀区代价为 253；
   - 若 $r_{\text{robot}} < d \le r_{\text{inf}}$：赋予**内切圆外指数衰减代价值**（`cost_scaling_factor` $= \alpha = 3.5$）：
-    $$C(d) = \operatorname{round}\!\Big(252 \cdot \exp\!\big(-\alpha (d - r_{\text{robot}})\big)\Big)$$
+    $$C(d) = \operatorname{floor}\!\Big(252 \cdot \exp\!\big(-\alpha (d - r_{\text{robot}})\big)\Big)$$
   这样 `SmacPlanner2D` 的启发式 A* 搜索在无狭缝逼迫时会自动贴近通道中轴线走低代价区，而非贴墙摩擦。
 
 ---
@@ -351,14 +392,14 @@ $$u_t^* = \frac{\sum_{m=1}^{1000} \exp\!\left(-\frac{1}{\lambda}\big(S(\tau^{(m)
    给定期望车体中心转弯半径 $R = \max(|v_x / \omega_z|, R_{\min})$。底盘固件指令里的 `steering` 字段控制参考内侧轮转角。在轴距 `wheelbase` ($L$)、轮距 `track` ($W$) 几何关系中，瞬心距离底盘中心横向偏移为 $R$，距离内侧转向轴横向距离为 $R - W/2$、前后轮距中心纵向距离为 $L/2$，由直角三角形正切立即得：
    $$\delta_{\text{steer}} = \operatorname{sign}(v_x \omega_z)\cdot \min\!\left(\operatorname{atan2}\!\left(\frac{L}{2},\; R - \frac{W}{2}\right),\; 0.698\text{ rad}\right)$$
 
-2. **蟹行横移模式 (`CRAB`, `mode=1`)**：当 $v_y \ne 0$ 且 $\omega_z = 0$ 时触发（四轮同向转向平行移动）。
+2. **蟹行横移模式 (`CRAB`, `mode=1`)**：当 $v_y \ne 0$ 且 $\omega_z = 0$ 时触发（舵轮同向转向平行移动）。
    - **硬件不对称物理限制**：Ranger Delta 物理转向角行程为 $[-30^\circ, +90^\circ]$，且 CAN 协议负指令转到正向物理角。因此舵角极限只能到 $\approx +0.523\text{ rad} \;(+30^\circ)$ 到 $-\pi/2 \;(-90^\circ)$，无法转到 $-90^\circ \sim -180^\circ$（即向左纯侧移所需的相反舵角）。
    - **纯几何半角翻转技巧**（第 41–60 行）：任意速度向量 $\mathbf{v} = (v_x, v_y)$ 与相反方向轮速乘 $-1$ 等价：
      $$(v_x, v_y) = \|v\|(\cos\theta, \sin\theta) = (-\|v\|)\big(\cos(\theta - \pi),\, \sin(\theta - \pi)\big)$$
      - 当斜向行驶解出 $\theta > 0.523\text{ rad}$ 时，程序令舵角减去 $\pi$ 并把轮速方向取反（`direction = -direction`），等价矢量纹丝不动地绕开了硬件限位！
      - 当纯左右侧移（$v_x = 0, v_y \ne 0$）时，统一将所有舵轮横转固定在 `-pi/2`（物理 $+90^\circ$）：向右移 ($v_y < 0$) 则正驱轮速，向左移 ($v_y > 0$) 则反驱轮速。
 
-3. **原地自旋模式 (`SPIN`, `mode=2`)**：当 $|v_x| < 0.001$ 且 $|v_y| < 0.001$ 时触发，四轮切向摆成同心圆切线，由底盘内环直接跟踪角速度 $\omega_z$。
+3. **原地自旋模式 (`SPIN`, `mode=2`)**：当 $|v_x| < 0.001$ 且 $|v_y| < 0.001$ 时触发，由底盘内环跟踪自旋角速度 $\omega_z$。
 
 ---
 
@@ -385,7 +426,7 @@ Ranger Delta 不能同时做纯横移 $v_y$ 与旋转 $\omega_z$（模式切换�
    - 平移：$u \in [0.013, 0.03]\text{ m/s}$，提前量停机容差 $0.002\text{ m}$。
 4. 走完单步立即停稳再做下一轮静止观测，最多允许 18 步内双轴同时收敛至 $(1\text{ cm}, 2^\circ)$。
 
-对无外部参照物的普通终点，[`DeltaPursuitController`](../src/odin_nav_sim/src/delta_pursuit_controller.cpp#L200-L360) 与 [`TerminalParking`](../src/odin_nav_sim/src/terminal_parking.hpp) 也遵循完全对称的“Approach → Align → Settle(0.30s) → 沿纵向/横向单轴微调 (`Reposition` 容差收紧到 $0.65\times$ 避免转弯摆尾越界) → Reached”闭环逻辑。
+普通目标在接近、对准航向、停稳复核三个阶段间切换。补位中若仍需转向，会尽量将位置误差缩到位置容差的 65%，为转向留下余量。位置与航向同时达标时立即制动，随后按配置完成完整的静止复核。
 
 ---
 
@@ -403,7 +444,7 @@ Ranger Delta 不能同时做纯横移 $v_y$ 与旋转 $\omega_z$（模式切换�
 
 ---
 
-## 第 6 章 全链路数学数据流与代码对照地图
+## 第 6 章 设备定位与工位对准的代码对照
 
 ```mermaid
 flowchart TD

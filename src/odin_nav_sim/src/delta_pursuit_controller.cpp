@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -82,6 +83,23 @@ public:
         topic, rclcpp::SensorDataQoS().keep_last(1),
         [this](Cloud::ConstSharedPtr cloud) {std::atomic_store(&cloud_, std::move(cloud));});
     }
+    const auto settle_hold_param = name + ".terminal_settle_hold_time";
+    if (!node->has_parameter(settle_hold_param)) {
+      node->declare_parameter(settle_hold_param, 0.30, descriptor);
+    }
+    terminal_settle_hold_time_ = node->get_parameter(settle_hold_param).as_double();
+    if (!std::isfinite(terminal_settle_hold_time_) || terminal_settle_hold_time_ <= 0.0) {
+      throw std::invalid_argument("terminal_settle_hold_time must be finite and positive");
+    }
+    const auto settle_timeout_param = name + ".terminal_settle_timeout";
+    if (!node->has_parameter(settle_timeout_param)) {
+      node->declare_parameter(settle_timeout_param, 3.0, descriptor);
+    }
+    terminal_settle_timeout_ = node->get_parameter(settle_timeout_param).as_double();
+    if (!std::isfinite(terminal_settle_timeout_) || terminal_settle_timeout_ <= 0.0) {
+      throw std::invalid_argument("terminal_settle_timeout must be finite and positive");
+    }
+    parking_ = TerminalParking(terminal_settle_hold_time_, terminal_settle_timeout_);
   }
 
   void cleanup() override
@@ -94,6 +112,8 @@ public:
     endpoint_pub_.reset();
     cloud_sub_.reset();
     std::atomic_store(&cloud_, Cloud::ConstSharedPtr{});
+    recent_clouds_.clear();
+    recent_footprints_.clear();
     RegulatedPurePursuitController::cleanup();
   }
 
@@ -141,9 +161,10 @@ public:
         tf2::getYaw(previous.orientation), tf2::getYaw(next.orientation))) > 1e-6 ||
       parking_finished_ || Clock::now() - last_compute_ > std::chrono::seconds(1))
     {
-      parking_ = {};
+      parking_ = TerminalParking(terminal_settle_hold_time_, terminal_settle_timeout_);
       parking_finished_ = false;
       reposition_mode_ = RepositionMode::Select;
+      reposition_switches_ = 0;
       last_parking_command_ = TerminalParking::Command::FollowPath;
       last_pose_stamp_ = 0;
     }
@@ -176,6 +197,35 @@ public:
       goal_yaw_tolerance = std::abs(tf2::getYaw(pose_tolerance.orientation));
     }
 
+    const auto & fp_pos = pose.pose.position;
+    if (recent_footprints_.empty() ||
+      std::hypot(fp_pos.x - recent_footprints_.back().x, fp_pos.y - recent_footprints_.back().y) >= 0.02)
+    {
+      recent_footprints_.push_back({last_compute_, fp_pos.x, fp_pos.y});
+    }
+    while (!recent_footprints_.empty() &&
+      last_compute_ - recent_footprints_.front().stamp > std::chrono::seconds(20))
+    {
+      recent_footprints_.pop_front();
+    }
+    if (const auto live_cloud = std::atomic_load(&cloud_)) {
+      const auto cloud_stamp = rclcpp::Time(live_cloud->header.stamp);
+      if (cloud_stamp.nanoseconds() != 0) {
+        if (recent_clouds_.empty() ||
+          (rclcpp::Time(recent_clouds_.back().cloud->header.stamp) != cloud_stamp &&
+          (std::hypot(fp_pos.x - recent_clouds_.back().x, fp_pos.y - recent_clouds_.back().y) >= 0.10 ||
+          (last_compute_ - recent_clouds_.back().stamp) >= std::chrono::milliseconds(1500))))
+        {
+          recent_clouds_.push_back({last_compute_, fp_pos.x, fp_pos.y, live_cloud});
+        }
+        while (recent_clouds_.size() > 8 || (!recent_clouds_.empty() &&
+          last_compute_ - recent_clouds_.front().stamp > std::chrono::seconds(15)))
+        {
+          recent_clouds_.pop_front();
+        }
+      }
+    }
+
     const auto path = transformGlobalPlan(pose);
     double lookahead = getLookAheadDistance(speed);
     if (allow_reversing_) {
@@ -195,13 +245,16 @@ public:
     auto parking_command = Command::FollowPath;
     const auto & end = path.poses.back().pose;
     double goal_yaw = tf2::getYaw(end.orientation);
-    std::optional<double> axial_velocity;
+    double goal_distance = std::hypot(end.position.x, end.position.y);
+    std::optional<PlanarVelocity> reposition_vel;
     if (settled_checker) {
       const auto parking = updateParking(pose, speed, goal_yaw_tolerance);
       parking_command = parking.command;
       goal_yaw = parking.heading_error;
+      goal_distance = std::hypot(parking.longitudinal, parking.lateral);
       if (!parking_.isRepositioning()) {
         reposition_mode_ = RepositionMode::Select;
+        reposition_switches_ = 0;
       }
       if (parking_command != last_parking_command_) {
         if (parking_command == Command::Reposition) {
@@ -216,26 +269,38 @@ public:
         throw nav2_core::PlannerException("Terminal parking could not settle within its limits");
       }
       if (parking_command == Command::Reposition) {
-        axial_velocity = axialReposition(pose, parking, goal_yaw_tolerance);
+        reposition_vel = repositionVelocity(pose, speed, parking, goal_yaw_tolerance);
       }
-      if (!axial_velocity &&
+      if (!reposition_vel &&
         (parking_command == Command::FollowPath || parking_command == Command::Reposition))
       {
-        updatePathPhase(path_heading, align_enter, align_exit);
+        // At the terminal carrot a small bearing error can still intersect the
+        // arrival disk on a forward arc. Avoid spinning just to hit its center.
+        const bool terminal_carrot = parking_command == Command::FollowPath &&
+          goal_distance < 0.30 && goal_distance > goal_dist_tol_ &&
+          std::hypot(point.x - parking.longitudinal, point.y - parking.lateral) < 0.005;
+        if (terminal_carrot) {
+          const double disk_angle = std::asin(kRepositionToleranceFactor * goal_dist_tol_ / goal_distance);
+          updatePathPhase(path_heading, align_enter + disk_angle, std::min(align_exit, 0.035));
+        } else {
+          updatePathPhase(path_heading, align_enter, align_exit);
+        }
       } else {
         phase_ = Phase::Tracking;
       }
     } else {
       updatePhase(
-        std::hypot(end.position.x, end.position.y), goal_yaw, goal_yaw_tolerance,
+        goal_distance, goal_yaw, goal_yaw_tolerance,
         path_heading, align_enter, align_exit);
     }
 
     double linear = desired_linear_vel_;
+    double lateral = 0.0;
     double angular = 0.0;
 
-    if (axial_velocity) {
-      linear = *axial_velocity;
+    if (reposition_vel) {
+      linear = reposition_vel->vx;
+      lateral = reposition_vel->vy;
     } else if (parking_command == Command::Hold || parking_command == Command::Reached) {
       linear = 0.0;
     } else if (parking_command == Command::AlignGoal || phase_ == Phase::AlignGoal) {
@@ -254,6 +319,11 @@ public:
       double speed_limit = std::abs(desired_linear_vel_);
       if (max_approach_linear_speed_ > 0.0 && approachVelocityScalingFactor(path) < 1.0) {
         speed_limit = std::min(speed_limit, max_approach_linear_speed_);
+      }
+      if (settled_checker) {
+        // Continuous speed cap down to the edge of the arrival tolerance (m/s).
+        const double remaining = std::max(0.0, goal_distance - goal_dist_tol_);
+        speed_limit = std::min(speed_limit, 0.035 + 0.55 * remaining);
       }
       // Enforce chassis limits after the optimizer smooths the control sequence.
       linear = std::max(0.0, tracking.twist.linear.x);
@@ -291,7 +361,7 @@ public:
       angular = std::copysign(max_tracking_angular_speed_, angular);
     }
     if (use_collision_detection_) {
-      checkTrajectory(pose, distance, linear, angular);
+      checkTrajectory(pose, distance, linear, lateral, angular);
     }
     if (parking_command == Command::Reached) {
       parking_finished_ = true;
@@ -300,6 +370,7 @@ public:
     geometry_msgs::msg::TwistStamped command;
     command.header = pose.header;
     command.twist.linear.x = linear;
+    command.twist.linear.y = lateral;
     command.twist.angular.z = angular;
     return command;
   }
@@ -308,7 +379,8 @@ private:
   using Clock = std::chrono::steady_clock;
   using Cloud = sensor_msgs::msg::PointCloud2;
   enum class Phase {Tracking, AlignPath, AlignGoal};
-  enum class RepositionMode {Select, Path, Forward, Reverse};
+  enum class RepositionMode {Select, Path, Forward, Reverse, Left, Right};
+  struct PlanarVelocity { double vx; double vy; };
 
   struct ParkingUpdate
   {
@@ -346,48 +418,113 @@ private:
         stopped, fresh}), yaw, longitudinal, lateral};
   }
 
-  std::optional<double> axialReposition(
-    const geometry_msgs::msg::PoseStamped & pose, const ParkingUpdate & parking,
-    double yaw_tolerance)
+  std::optional<PlanarVelocity> repositionVelocity(
+    const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Twist & speed,
+    const ParkingUpdate & parking, double yaw_tolerance)
   {
     if (reposition_mode_ == RepositionMode::Path) {
       return std::nullopt;
     }
-    const auto sweep = axialSweepDistance(
-      parking.longitudinal, parking.lateral, kRepositionToleranceFactor * goal_dist_tol_);
-    const bool selecting = reposition_mode_ == RepositionMode::Select;
-    const auto & position = pose.pose.position;
-    const double traveled = selecting ? 0.0 :
-      std::hypot(position.x - axial_start_.x, position.y - axial_start_.y);
-    const auto direction = parking.longitudinal < 0.0 ?
-      RepositionMode::Reverse : RepositionMode::Forward;
-    const bool geometry_ok = sweep && std::abs(parking.heading_error) < yaw_tolerance &&
-      traveled + std::abs(*sweep) <= kMaxAxialTravel &&
-      (selecting || direction == reposition_mode_);
-    if (!geometry_ok || !use_collision_detection_ || !hasObservedClearance(pose, *sweep)) {
-      if (!selecting) {
-        parking_finished_ = true;
-        throw nav2_core::PlannerException("Terminal parking lost straight-move clearance");
+    const double inner_tol = kRepositionToleranceFactor * goal_dist_tol_;
+    const double dx = parking.longitudinal;
+    const double dy = parking.lateral;
+    const double yaw_limit = std::max(yaw_tolerance, 0.15);
+
+    auto trySelectAxis = [&](bool lateral) -> bool {
+        const double err = lateral ? dy : dx;
+        const double other = lateral ? dx : dy;
+        const auto direct = axialSweepDistance(err, other, inner_tol);
+        std::optional<double> sweep = direct;
+        if (!sweep && std::abs(err) >= 0.5 * inner_tol &&
+          std::hypot(dx, dy) <= kMaxAxialTravel &&
+          std::abs(err) + kAxialStoppingMargin <= kMaxAxialTravel + kAxialStoppingMargin)
+        {
+          sweep = std::copysign(std::abs(err) + kAxialStoppingMargin, err);
+        }
+        if (!sweep || !hasObservedClearance(pose, *sweep, lateral)) {
+          return false;
+        }
+        reposition_mode_ = lateral ?
+          (err >= 0.0 ? RepositionMode::Left : RepositionMode::Right) :
+          (err >= 0.0 ? RepositionMode::Forward : RepositionMode::Reverse);
+        axial_start_ = pose.pose.position;
+        const char * label = lateral ?
+          (err >= 0.0 ? "left crab" : "right crab") :
+          (err >= 0.0 ? "forward" : "reverse");
+        RCLCPP_INFO(
+          logger_, "Terminal parking: straight %s correction (dx=%.3f, dy=%.3f)",
+          label, dx, dy);
+        return true;
+      };
+
+    if (reposition_mode_ == RepositionMode::Select) {
+      bool selected = false;
+      const bool geometry_within_reach = std::hypot(dx, dy) <= kMaxAxialTravel &&
+        std::abs(parking.heading_error) < yaw_limit;
+      if (geometry_within_reach && use_collision_detection_) {
+        if (std::abs(dy) < inner_tol && axialSweepDistance(dx, dy, inner_tol)) {
+          selected = trySelectAxis(false);
+        } else if (std::abs(dx) < inner_tol && axialSweepDistance(dy, dx, inner_tol)) {
+          selected = trySelectAxis(true);
+        } else if (std::abs(dy) >= std::abs(dx)) {
+          selected = trySelectAxis(true) || trySelectAxis(false);
+        } else {
+          selected = trySelectAxis(false) || trySelectAxis(true);
+        }
       }
-      reposition_mode_ = RepositionMode::Path;
-      RCLCPP_INFO(
-        logger_, "Terminal parking: following path for repositioning (dx=%.3f, dy=%.3f; %s)",
-        parking.longitudinal, parking.lateral,
-        geometry_ok ? "no verified straight clearance" : "outside straight-move limits");
-      return std::nullopt;
+      if (!selected) {
+        reposition_mode_ = RepositionMode::Path;
+        RCLCPP_INFO(
+          logger_, "Terminal parking: following path for repositioning (dx=%.3f, dy=%.3f; %s)",
+          dx, dy, geometry_within_reach ? "no verified straight clearance" : "outside straight-move limits");
+        return std::nullopt;
+      }
     }
-    if (selecting) {
-      reposition_mode_ = direction;
-      axial_start_ = position;
-      RCLCPP_INFO(
-        logger_, "Terminal parking: straight %s correction (dx=%.3f, dy=%.3f)",
-        direction == RepositionMode::Reverse ? "reverse" : "forward",
-        parking.longitudinal, parking.lateral);
+
+    const bool lateral =
+      reposition_mode_ == RepositionMode::Left || reposition_mode_ == RepositionMode::Right;
+    const double err = lateral ? dy : dx;
+    const double other = lateral ? dx : dy;
+    const double sign =
+      (reposition_mode_ == RepositionMode::Forward || reposition_mode_ == RepositionMode::Left) ?
+      1.0 : -1.0;
+    const double stop_thresh = (std::abs(other) < inner_tol) ?
+      std::sqrt(std::max(0.0, inner_tol * inner_tol - other * other)) : 0.5 * inner_tol;
+    const double remaining = sign * err;
+
+    if (remaining <= stop_thresh) {
+      const bool stopped = std::hypot(speed.linear.x, speed.linear.y) <= 0.01 &&
+        std::abs(speed.angular.z) <= 0.03;
+      if (stopped) {
+        if (++reposition_switches_ > 3) {
+          reposition_mode_ = RepositionMode::Path;
+          return std::nullopt;
+        }
+        reposition_mode_ = RepositionMode::Select;
+      }
+      return PlanarVelocity{0.0, 0.0};
     }
-    return std::copysign(std::min(kAxialSpeed, std::abs(desired_linear_vel_)), *sweep);
+
+    const double traveled = std::hypot(
+      pose.pose.position.x - axial_start_.x, pose.pose.position.y - axial_start_.y);
+    const double sweep_check = sign * std::max(remaining + kAxialStoppingMargin, 0.035);
+    if (std::abs(parking.heading_error) >= std::max(yaw_limit, 0.25) ||
+      traveled + remaining > kMaxAxialTravel + 0.05 || !use_collision_detection_ ||
+      !hasObservedClearance(pose, sweep_check, lateral))
+    {
+      parking_finished_ = true;
+      throw nav2_core::PlannerException("Terminal parking lost straight-move clearance");
+    }
+    const double dist_left = remaining - stop_thresh;
+    const double max_speed = lateral ?
+      kCrabSpeed : std::min(kAxialSpeed, std::abs(desired_linear_vel_));
+    const double speed_mag = std::clamp(1.6 * dist_left, 0.015, max_speed);
+    return lateral ?
+      PlanarVelocity{0.0, sign * speed_mag} : PlanarVelocity{sign * speed_mag, 0.0};
   }
 
-  bool hasObservedClearance(const geometry_msgs::msg::PoseStamped & pose, double sweep) const
+  bool hasObservedClearance(
+    const geometry_msgs::msg::PoseStamped & pose, double sweep, bool lateral = false) const
   {
     const auto cloud = std::atomic_load(&cloud_);
     if (!cloud || cloud->data.empty() || cloud->header.frame_id.empty() || cloud->is_bigendian ||
@@ -399,50 +536,92 @@ private:
     }
     const auto stamp = rclcpp::Time(cloud->header.stamp);
     const auto age = (clock_->now() - stamp).seconds();
-    if (stamp.nanoseconds() == 0 || age < 0.0 || age > 0.35) {
-      return false;
-    }
-    const auto field_offset = [&cloud](const char * name) -> std::optional<size_t> {
-        const auto field = std::find_if(
-          cloud->fields.begin(), cloud->fields.end(),
-          [name](const auto & f) {return f.name == name;});
-        if (field == cloud->fields.end() || field->datatype != sensor_msgs::msg::PointField::FLOAT32 ||
-          field->count != 1 || field->offset + sizeof(float) > cloud->point_step)
-        {
-          return std::nullopt;
-        }
-        return field->offset;
-      };
-    const auto x_offset = field_offset("x"), y_offset = field_offset("y");
-    const auto z_offset = field_offset("z");
-    if (!x_offset || !y_offset || !z_offset) {
-      return false;
-    }
-
-    tf2::Transform cloud_to_odom;
-    try {
-      const auto transform = tf_->lookupTransform(
-        pose.header.frame_id, cloud->header.frame_id, stamp, rclcpp::Duration::from_seconds(0.0));
-      tf2::fromMsg(transform.transform, cloud_to_odom);
-    } catch (const tf2::TransformException &) {
+    if (stamp.nanoseconds() == 0 || age < 0.0 || age > 0.50) {
       return false;
     }
     TerminalClearance clearance(*costmap_);
-    const auto & origin = cloud_to_odom.getOrigin();
-    const auto * data = cloud->data.data();
-    for (size_t i = 0; i < cloud->data.size(); i += cloud->point_step) {
-      // ODIN1 packs points at a 19-byte stride, so XYZ need not be aligned.
-      float x, y, z;
-      std::memcpy(&x, data + i + *x_offset, sizeof(float));
-      std::memcpy(&y, data + i + *y_offset, sizeof(float));
-      std::memcpy(&z, data + i + *z_offset, sizeof(float));
-      if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
-        clearance.observe(origin, cloud_to_odom * tf2::Vector3(x, y, z));
+    const double footprint_r = costmap_ros_->getLayeredCostmap()->getCircumscribedRadius();
+    for (const auto & fp : recent_footprints_) {
+      clearance.markRecentlyOccupied(fp.x, fp.y, footprint_r);
+    }
+
+    auto feedCloud = [&](const Cloud::ConstSharedPtr & scan, bool mark_obstacle) -> bool {
+        if (!scan || scan->data.empty() || scan->header.frame_id.empty() || scan->is_bigendian ||
+          scan->height == 0 || scan->width == 0 || scan->point_step == 0 ||
+          static_cast<size_t>(scan->width) * scan->point_step != scan->row_step ||
+          scan->data.size() != static_cast<size_t>(scan->row_step) * scan->height)
+        {
+          return false;
+        }
+        const auto field_offset = [&scan](const char * name) -> std::optional<size_t> {
+            const auto field = std::find_if(
+              scan->fields.begin(), scan->fields.end(),
+              [name](const auto & f) {return f.name == name;});
+            if (field == scan->fields.end() ||
+              field->datatype != sensor_msgs::msg::PointField::FLOAT32 ||
+              field->count != 1 || field->offset + sizeof(float) > scan->point_step)
+            {
+              return std::nullopt;
+            }
+            return field->offset;
+          };
+        const auto x_offset = field_offset("x"), y_offset = field_offset("y");
+        const auto z_offset = field_offset("z");
+        if (!x_offset || !y_offset || !z_offset) {
+          return false;
+        }
+        const auto scan_stamp = rclcpp::Time(scan->header.stamp);
+        tf2::Transform cloud_to_odom;
+        try {
+          const auto transform = tf_->lookupTransform(
+            pose.header.frame_id, scan->header.frame_id, scan_stamp,
+            rclcpp::Duration::from_seconds(0.0));
+          tf2::fromMsg(transform.transform, cloud_to_odom);
+        } catch (const tf2::TransformException &) {
+          return false;
+        }
+        const auto & origin = cloud_to_odom.getOrigin();
+        const auto * data = scan->data.data();
+        for (size_t i = 0; i < scan->data.size(); i += scan->point_step) {
+          // ODIN1 packs points at a 19-byte stride, so XYZ need not be aligned.
+          float x, y, z;
+          std::memcpy(&x, data + i + *x_offset, sizeof(float));
+          std::memcpy(&y, data + i + *y_offset, sizeof(float));
+          std::memcpy(&z, data + i + *z_offset, sizeof(float));
+          if (std::isfinite(x) && std::isfinite(y) && std::isfinite(z)) {
+            const tf2::Vector3 hit = cloud_to_odom * tf2::Vector3(x, y, z);
+            if (mark_obstacle) {
+              clearance.observe(origin, hit);
+            } else {
+              clearance.observeFreeOnly(origin, hit);
+            }
+          }
+        }
+        return true;
+      };
+
+    // Incorporate up to two prior approach snapshots strictly as free-space evidence
+    // so side-rear blind zones seen during pull-in remain verified for CRAB shifts,
+    // while live obstacle hits always come from the latest scan and rolling costmap.
+    if (!recent_clouds_.empty()) {
+      const Cloud::ConstSharedPtr & first = recent_clouds_.front().cloud;
+      if (first.get() != cloud.get()) {
+        feedCloud(first, false);
+      }
+      if (recent_clouds_.size() >= 3) {
+        const Cloud::ConstSharedPtr & mid = recent_clouds_[recent_clouds_.size() / 2].cloud;
+        if (mid.get() != cloud.get() && mid.get() != first.get()) {
+          feedCloud(mid, false);
+        }
       }
     }
+    if (!feedCloud(cloud, true)) {
+      return false;
+    }
+
+    const double sweep_yaw = tf2::getYaw(pose.pose.orientation) + (lateral ? M_PI_2 : 0.0);
     return clearance.permits(
-      *costmap_, pose.pose.position.x, pose.pose.position.y, tf2::getYaw(pose.pose.orientation),
-      sweep, costmap_ros_->getLayeredCostmap()->getCircumscribedRadius());
+      *costmap_, pose.pose.position.x, pose.pose.position.y, sweep_yaw, sweep, footprint_r);
   }
 
   void updatePhase(
@@ -480,14 +659,15 @@ private:
 
   void checkTrajectory(
     const geometry_msgs::msg::PoseStamped & pose, double distance,
-    double linear, double angular)
+    double linear, double lateral, double angular)
   {
     // Sample the actual commanded arc at no more than half a cell of footprint motion.
     const double radius = costmap_ros_->getLayeredCostmap()->getCircumscribedRadius();
-    const double edge_speed = std::abs(linear) + radius * std::abs(angular);
+    const double speed = std::hypot(linear, lateral);
+    const double edge_speed = speed + radius * std::abs(angular);
     double horizon = max_allowed_time_to_collision_up_to_carrot_;
-    if (std::abs(linear) > 0.0) {
-      horizon = std::min(horizon, distance / std::abs(linear));
+    if (speed > 0.0) {
+      horizon = std::min(horizon, distance / speed);
     }
     const auto steps = std::max(1, static_cast<int>(
         std::ceil(2.0 * horizon * edge_speed / costmap_->getResolution())));
@@ -496,16 +676,24 @@ private:
     const double yaw = tf2::getYaw(pose.pose.orientation);
     for (int step = 0; step <= steps; ++step) {
       const double t = horizon * step / steps;
-      const double half_turn = angular * t / 2.0;
-      const double chord = linear * t *
-        (half_turn == 0.0 ? 1.0 : std::sin(half_turn) / half_turn);
       auto sample = pose;
-      sample.pose.position.x += chord * std::cos(yaw + half_turn);
-      sample.pose.position.y += chord * std::sin(yaw + half_turn);
-      const double heading = yaw + 2.0 * half_turn;
-      sample.pose.orientation.z = std::sin(heading / 2.0);
-      sample.pose.orientation.w = std::cos(heading / 2.0);
-      sample.pose.orientation.x = sample.pose.orientation.y = 0.0;
+      double heading = yaw;
+      if (lateral != 0.0 && angular == 0.0) {
+        const double dx_body = linear * t;
+        const double dy_body = lateral * t;
+        sample.pose.position.x += dx_body * std::cos(yaw) - dy_body * std::sin(yaw);
+        sample.pose.position.y += dx_body * std::sin(yaw) + dy_body * std::cos(yaw);
+      } else {
+        const double half_turn = angular * t / 2.0;
+        const double chord = linear * t *
+          (half_turn == 0.0 ? 1.0 : std::sin(half_turn) / half_turn);
+        sample.pose.position.x += chord * std::cos(yaw + half_turn);
+        sample.pose.position.y += chord * std::sin(yaw + half_turn);
+        heading = yaw + 2.0 * half_turn;
+        sample.pose.orientation.z = std::sin(heading / 2.0);
+        sample.pose.orientation.w = std::cos(heading / 2.0);
+        sample.pose.orientation.x = sample.pose.orientation.y = 0.0;
+      }
       arc.poses.push_back(sample);
       if (inCollision(sample.pose.position.x, sample.pose.position.y, heading)) {
         carrot_arc_pub_->publish(arc);
@@ -520,6 +708,8 @@ private:
   pluginlib::UniquePtr<nav2_core::Controller> tracking_controller_;
   double max_tracking_angular_speed_{0.0};
   double max_approach_linear_speed_{0.0};
+  double terminal_settle_hold_time_{0.30};
+  double terminal_settle_timeout_{3.0};
   Phase phase_{Phase::Tracking};
   geometry_msgs::msg::PoseStamped endpoint_;
   rclcpp_lifecycle::LifecyclePublisher<geometry_msgs::msg::PoseStamped>::SharedPtr endpoint_pub_;
@@ -530,9 +720,25 @@ private:
   TerminalParking::Command last_parking_command_{TerminalParking::Command::FollowPath};
   bool parking_finished_{false};
   RepositionMode reposition_mode_{RepositionMode::Select};
+  int reposition_switches_{0};
   geometry_msgs::msg::Point axial_start_;
   Cloud::ConstSharedPtr cloud_;
+  struct CloudSample
+  {
+    Clock::time_point stamp;
+    double x;
+    double y;
+    Cloud::ConstSharedPtr cloud;
+  };
+  std::deque<CloudSample> recent_clouds_;
   rclcpp::Subscription<Cloud>::SharedPtr cloud_sub_;
+  struct FootprintSample
+  {
+    Clock::time_point stamp;
+    double x;
+    double y;
+  };
+  std::deque<FootprintSample> recent_footprints_;
 };
 
 }  // namespace odin_nav_sim

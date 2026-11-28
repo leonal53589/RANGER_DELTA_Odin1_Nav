@@ -13,12 +13,17 @@
   <depend>geometry_msgs</depend>
   <depend>nav2_controller</depend>
   <depend>nav2_costmap_2d</depend>
+  <depend>nav2_voxel_grid</depend>
   <depend>nav2_regulated_pure_pursuit_controller</depend>
   <depend>nav2_util</depend>
   <depend>nav_msgs</depend>
   <depend>pluginlib</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>rclcpp</depend>
   <exec_depend>agx_bringup</exec_depend>
   <depend>action_msgs</depend>
   <exec_depend>ament_index_python</exec_depend>
@@ -42,10 +47,6 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>sensor_msgs_py</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>tf2_msgs</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
-
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>launch_testing</test_depend>

@@ -7,7 +7,7 @@
                             prefix="{safe_prefix}" yield_seconds="2.0" blocked_seconds="20.0">
           <ComputePathToPose goal="{goal}" path="{candidate}" planner_id="GridBased"/>
           <IsPathValid path="{path}"/>
-          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <FollowPath path="{path}" controller_id="FollowPath" server_timeout="100"/>
           <IsPathValid path="{goal_probe}"/>
           <IsPathValid path="{safe_prefix}"/>
         </ObstacleNavigation>

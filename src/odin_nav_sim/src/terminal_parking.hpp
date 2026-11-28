@@ -25,6 +25,12 @@ public:
     bool fresh;
   };
 
+  TerminalParking() = default;
+  TerminalParking(double settle_hold_seconds, double settle_timeout_seconds)
+  : settle_hold_seconds_(settle_hold_seconds),
+    settle_timeout_seconds_(settle_timeout_seconds)
+  {}
+
   bool isRepositioning() const {return phase_ == Phase::Reposition;}
 
   Command update(const Sample & sample)
@@ -47,8 +53,11 @@ public:
       phase_ = Phase::Align;
     }
     if (phase_ == Phase::Reposition) {
-      // Leave room for the position estimate to move during the final turn.
-      if (sample.distance > kRepositionToleranceFactor * sample.xy_tolerance) {
+      // Reserve an inner margin only while a final turn is still needed. If both
+      // errors already pass, brake and verify the full stationary hold.
+      if (!(xy_ok && yaw_ok) &&
+        sample.distance > kRepositionToleranceFactor * sample.xy_tolerance)
+      {
         return Command::Reposition;
       }
       phase_ = Phase::Align;
@@ -62,7 +71,7 @@ public:
       stable_since_.reset();
     }
 
-    if (sample.time - settle_started_ >= 3.0) {
+    if (sample.time - settle_started_ >= settle_timeout_seconds_) {
       return Command::Failed;
     }
     if (!sample.stopped) {
@@ -76,7 +85,7 @@ public:
       stable_since_ = sample.time;
       return Command::Hold;
     }
-    if (sample.time - *stable_since_ < 0.30) {
+    if (sample.time - *stable_since_ < settle_hold_seconds_) {
       return Command::Hold;
     }
     if (condition == Condition::Reached) {
@@ -100,6 +109,8 @@ private:
   Condition condition_{Condition::Reached};
   std::optional<double> started_;
   std::optional<double> stable_since_;
+  double settle_hold_seconds_{0.30};
+  double settle_timeout_seconds_{3.0};
   double settle_started_{0.0};
   int corrections_{0};
 };

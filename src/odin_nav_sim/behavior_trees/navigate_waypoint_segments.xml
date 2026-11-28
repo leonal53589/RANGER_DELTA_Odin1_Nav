@@ -14,7 +14,7 @@
                             goal_probe="{goal_probe}" prefix="{safe_prefix}">
           <ComputePathThroughPoses goals="{segment_goals}" path="{candidate}" planner_id="GridBased"/>
           <IsPathValid path="{path}"/>
-          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <FollowPath path="{path}" controller_id="FollowPath" server_timeout="100"/>
           <IsPathValid path="{goal_probe}"/>
           <IsPathValid path="{safe_prefix}"/>
         </ObstacleNavigation>

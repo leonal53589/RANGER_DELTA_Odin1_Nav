@@ -16,6 +16,7 @@ namespace odin_nav_sim
 constexpr double kMaxAxialTravel = 0.20;
 constexpr double kAxialStoppingMargin = 0.025;
 constexpr double kAxialSpeed = 0.05;
+constexpr double kCrabSpeed = 0.035;
 
 inline std::optional<double> axialSweepDistance(
   double longitudinal, double lateral, double inner_tolerance)
@@ -43,40 +44,44 @@ public:
     traced_(static_cast<size_t>(map.getSizeInCellsX()) * map.getSizeInCellsY(), false)
   {}
 
+  void markRecentlyOccupied(double x, double y, double radius)
+  {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(radius) || radius <= 0.0) {
+      return;
+    }
+    const double extent = radius + getResolution() * std::sqrt(0.5);
+    unsigned int x_min, y_min, x_max, y_max;
+    if (!worldToMap(x - extent, y - extent, x_min, y_min) ||
+      !worldToMap(x + extent, y + extent, x_max, y_max))
+    {
+      return;
+    }
+    auto * cells = getCharMap();
+    const double r2 = extent * extent;
+    for (unsigned int cy = y_min; cy <= y_max; ++cy) {
+      for (unsigned int cx = x_min; cx <= x_max; ++cx) {
+        double wx, wy;
+        mapToWorld(cx, cy, wx, wy);
+        const double dx = wx - x;
+        const double dy = wy - y;
+        if (dx * dx + dy * dy <= r2) {
+          const auto idx = getIndex(cx, cy);
+          if (cells[idx] == nav2_costmap_2d::NO_INFORMATION) {
+            cells[idx] = nav2_costmap_2d::FREE_SPACE;
+          }
+        }
+      }
+    }
+  }
+
   void observe(const tf2::Vector3 & origin, const tf2::Vector3 & hit)
   {
-    constexpr double min_obstacle_height = 0.12;
-    constexpr double max_obstacle_height = 1.35;
-    const auto ray = hit - origin;
-    const double length = std::hypot(ray.x(), ray.y());
-    if (!std::isfinite(length) || !std::isfinite(hit.z()) ||
-      length <= getResolution() || hit.z() < -0.10 || hit.z() > max_obstacle_height)
-    {
-      return;
-    }
-    unsigned int x, y, ox, oy;
-    if (hit.z() >= min_obstacle_height && worldToMap(hit.x(), hit.y(), x, y)) {
-      setCost(x, y, nav2_costmap_2d::LETHAL_OBSTACLE);
-    }
+    observeImpl(origin, hit, true);
+  }
 
-    // Cover only cells short of a measured return, never beyond it.
-    const auto limit = origin + ray * (std::min(1.0, length - getResolution()) / length);
-    if (!worldToMap(origin.x(), origin.y(), ox, oy) ||
-      !worldToMap(limit.x(), limit.y(), x, y))
-    {
-      return;
-    }
-    const auto index = getIndex(x, y);
-    if (!traced_[index]) {
-      traced_[index] = true;
-      auto * cells = getCharMap();
-      raytraceLine(
-        [cells](unsigned int cell) {
-          if (cells[cell] == nav2_costmap_2d::NO_INFORMATION) {
-            cells[cell] = nav2_costmap_2d::FREE_SPACE;
-          }
-        }, ox, oy, x, y);
-    }
+  void observeFreeOnly(const tf2::Vector3 & origin, const tf2::Vector3 & hit)
+  {
+    observeImpl(origin, hit, false);
   }
 
   bool permits(
@@ -121,6 +126,42 @@ public:
   }
 
 private:
+  void observeImpl(const tf2::Vector3 & origin, const tf2::Vector3 & hit, bool mark_obstacle)
+  {
+    constexpr double min_obstacle_height = 0.12;
+    constexpr double max_obstacle_height = 1.35;
+    const auto ray = hit - origin;
+    const double length = std::hypot(ray.x(), ray.y());
+    if (!std::isfinite(length) || !std::isfinite(hit.z()) ||
+      length <= getResolution() || hit.z() < -0.10 || hit.z() > max_obstacle_height)
+    {
+      return;
+    }
+    unsigned int x, y, ox, oy;
+    if (mark_obstacle && hit.z() >= min_obstacle_height && worldToMap(hit.x(), hit.y(), x, y)) {
+      setCost(x, y, nav2_costmap_2d::LETHAL_OBSTACLE);
+    }
+
+    // Cover only cells short of a measured return, never beyond it.
+    const auto limit = origin + ray * (std::min(1.0, length - getResolution()) / length);
+    if (!worldToMap(origin.x(), origin.y(), ox, oy) ||
+      !worldToMap(limit.x(), limit.y(), x, y))
+    {
+      return;
+    }
+    const auto index = getIndex(x, y);
+    if (!traced_[index]) {
+      traced_[index] = true;
+      auto * cells = getCharMap();
+      raytraceLine(
+        [cells](unsigned int cell) {
+          if (cells[cell] == nav2_costmap_2d::NO_INFORMATION) {
+            cells[cell] = nav2_costmap_2d::FREE_SPACE;
+          }
+        }, ox, oy, x, y);
+    }
+  }
+
   std::vector<bool> traced_;
 };
 
